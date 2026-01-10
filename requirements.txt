@@ -1,0 +1,8 @@
+streamlit
+google-generativeai
+google-cloud-firestore
+firebase-admin
+duckduckgo-search
+edge-tts
+pypdf2
+pillow
