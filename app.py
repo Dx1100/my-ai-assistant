@@ -43,7 +43,7 @@ else:
     st.stop()
 
 # USE THE KNOWN AVAILABLE MODEL (From your list)
-model_name = 'gemini-2.0-flash-lite' 
+model_name = 'gemini-flash-latest' 
 model = genai.GenerativeModel(model_name)
 
 # --- FUNCTIONS ---
