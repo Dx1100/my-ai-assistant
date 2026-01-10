@@ -47,7 +47,7 @@ else:
     st.error("Missing Gemini API Key.")
     st.stop()
 
-model = genai.GenerativeModel('gemini-2.0-flash')
+model = genai.GenerativeModel('gemini-2.0-flash-lite')
 
 # --- FUNCTIONS ---
 def get_tasks():
@@ -80,18 +80,10 @@ def read_file(uploaded):
 
 # --- UI ---
 st.title("🤖 My AI Manager")
+# DELETE THIS BLOCK
 # --- DIAGNOSTIC TOOL ---
-if st.button("🔍 Check Available Models"):
-    try:
-        models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                models.append(m.name)
-        st.success(f"Success! Your API Key works.")
-        st.write("Here are the exact names you can use:")
-        st.json(models)
-    except Exception as e:
-        st.error(f"API Key Error: {e}")
+# if st.button("🔍 Check Available Models"):
+# ...
 # -----------------------
 
 with st.sidebar:
