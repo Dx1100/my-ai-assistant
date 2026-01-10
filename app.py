@@ -47,7 +47,7 @@ else:
     st.error("Missing Gemini API Key.")
     st.stop()
 
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-pro')
 
 # --- FUNCTIONS ---
 def get_tasks():
