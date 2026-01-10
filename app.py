@@ -7,27 +7,22 @@ import edge_tts
 import asyncio
 import json
 import tempfile
-from PIL import Image
+import time
 import PyPDF2
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="My AI Assistant", layout="wide")
 
 # 1. Setup Database (Firebase)
-# We use a trick to handle the JSON key securely in the cloud
 if "FIREBASE_KEY" in st.secrets:
-    # If the key is stored as a string in secrets, parse it
     key_info = st.secrets["FIREBASE_KEY"]
-    # Handle cases where it might be double-encoded
     if isinstance(key_info, str):
         try:
             key_dict = json.loads(key_info)
-        except json.JSONDecodeError:
-            # If it's not valid JSON, it might be TOML format, try accessing directly if mapped
-            st.error("Error decoding Firebase JSON. Check Secrets format.")
+        except:
+            st.error("Error decoding Firebase Key. Check Secrets.")
             st.stop()
     else:
-        # If Streamlit parsed it as a TOML table already
         key_dict = dict(key_info)
 
     cred = credentials.Certificate(key_dict)
@@ -37,7 +32,7 @@ if "FIREBASE_KEY" in st.secrets:
         firebase_admin.initialize_app(cred)
     db = firestore.client()
 else:
-    st.warning("⚠️ Database not connected. Tasks will not be saved.")
+    st.warning("⚠️ Database disconnected. Tasks won't save.")
     db = None
 
 # 2. Setup Brain (Gemini)
@@ -47,13 +42,18 @@ else:
     st.error("Missing Gemini API Key.")
     st.stop()
 
-model = genai.GenerativeModel('gemini-2.0-flash-lite')
+# USE THE KNOWN AVAILABLE MODEL (From your list)
+model_name = 'gemini-2.0-flash-lite' 
+model = genai.GenerativeModel(model_name)
 
 # --- FUNCTIONS ---
 def get_tasks():
     if not db: return []
-    docs = db.collection('tasks').stream()
-    return [f"{doc.id}: {doc.to_dict().get('task')}" for doc in docs]
+    try:
+        docs = db.collection('tasks').stream()
+        return [f"{doc.id}: {doc.to_dict().get('task')}" for doc in docs]
+    except:
+        return []
 
 def add_task(task_text):
     if db:
@@ -74,17 +74,32 @@ async def speak(text):
 
 def read_file(uploaded):
     if uploaded.name.endswith(".pdf"):
-        reader = PyPDF2.PdfReader(uploaded)
-        return "".join([p.extract_text() for p in reader.pages])
+        try:
+            reader = PyPDF2.PdfReader(uploaded)
+            return "".join([p.extract_text() for p in reader.pages])
+        except: return "Error reading PDF"
     return ""
+
+def ask_gemini(prompt):
+    """
+    CRASH PROTECTION: 
+    This function catches the 429 Error and waits automatically 
+    instead of crashing the app.
+    """
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        err_msg = str(e)
+        if "429" in err_msg or "ResourceExhausted" in err_msg:
+            return "⚠️ Speed Limit Reached. Please wait 30 seconds and try again."
+        elif "NotFound" in err_msg:
+            return f"Error: Model {model_name} not found. Please check spelling."
+        else:
+            return f"System Error: {err_msg}"
 
 # --- UI ---
 st.title("🤖 My AI Manager")
-# DELETE THIS BLOCK
-# --- DIAGNOSTIC TOOL ---
-# if st.button("🔍 Check Available Models"):
-# ...
-# -----------------------
 
 with st.sidebar:
     st.header("Upload Context")
@@ -93,8 +108,13 @@ with st.sidebar:
     st.header("My Tasks")
     if st.button("Refresh Tasks"):
         st.rerun()
-    for t in get_tasks():
-        st.write(f"• {t}")
+    
+    tasks_list = get_tasks()
+    if tasks_list:
+        for t in tasks_list:
+            st.write(f"• {t}")
+    else:
+        st.write("No tasks found.")
 
 # Chat
 if "messages" not in st.session_state: st.session_state.messages = []
@@ -103,37 +123,38 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
 
-user_input = st.chat_input("Type instruction (or use voice input on mobile)...")
+user_input = st.chat_input("Type instruction...")
 
 if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
         st.write(user_input)
 
-    # Prepare Context
-    context = f"CURRENT TASKS: {get_tasks()}\n"
+    # Context
+    context = f"CURRENT TASKS: {tasks_list}\n"
     if uploaded_file: context += f"FILE CONTENT: {read_file(uploaded_file)}\n"
     
-    # Simple Router
+    # Logic
+    reply = ""
     if "save" in user_input.lower() and "task" in user_input.lower():
-        prompt = f"{context} User said: '{user_input}'. Extract the task content only."
-        # Quick logic to save task
-        add_task(user_input.replace("save task", "").strip())
-        reply = "I have saved that task to your database."
-    elif "search" in user_input.lower() or "news" in user_input.lower():
-        search_data = web_search(user_input)
-        prompt = f"Context: {context} \n Web Search: {search_data} \n User: {user_input} \n Answer:"
-        response = model.generate_content(prompt)
-        reply = response.text
+        clean_task = user_input.lower().replace("save", "").replace("task", "").strip()
+        add_task(clean_task)
+        reply = f"✅ Saved task: {clean_task}"
+    
+    elif "search" in user_input.lower():
+        search_res = web_search(user_input)
+        prompt = f"Context: {context} \n Web Results: {search_res} \n User: {user_input} \n Answer:"
+        reply = ask_gemini(prompt)
+        
     else:
         prompt = f"Context: {context} \n User: {user_input} \n Answer:"
-        response = model.generate_content(prompt)
-        reply = response.text
+        reply = ask_gemini(prompt)
 
     # Reply
     with st.chat_message("assistant"):
         st.write(reply)
-        audio_path = asyncio.run(speak(reply.replace("*", "")))
-        st.audio(audio_path, autoplay=True)
+        if "⚠️" not in reply: # Don't speak error messages
+            audio_path = asyncio.run(speak(reply.replace("*", "")))
+            st.audio(audio_path, autoplay=True)
     
     st.session_state.messages.append({"role": "assistant", "content": reply})
