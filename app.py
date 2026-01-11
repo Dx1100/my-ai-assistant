@@ -194,10 +194,7 @@ if user_input:
        (Current Date & Time in India: {india_time.strftime("%Y-%m-%d %H:%M:%S")})
        IMPORTANT: The user is in India (IST). Use the current India time above to calculate dates.
     
-    2. If user wants to SAVE MEMORY, output JSON:
-       {{"action": "memory", "text": "The fact to save"}}
-       
-    3. Else answer normally.
+
     """
     
     full_prompt = [f"{sys_prompt} \n USER: {user_input}"]
