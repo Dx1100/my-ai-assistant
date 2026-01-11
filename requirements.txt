@@ -6,3 +6,5 @@ duckduckgo-search
 edge-tts
 pypdf2
 pillow
+google-auth
+google-api-python-client
