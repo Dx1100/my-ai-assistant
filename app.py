@@ -152,15 +152,48 @@ def process_file(uploaded):
 # --- UI ---
 st.title("🤖 My AI Jarvis")
 
-# Sidebar
-with st.sidebar:
-    st.header("Upload File")
-    uploaded_file = st.file_uploader("Context", type=["pdf", "png", "jpg", "txt"])
-    st.divider()
-    if st.button("Refresh Calendar"): st.rerun()
-    st.write("📅 **Upcoming Events:**")
-    st.write(get_calendar_events())
+# --- SIDEBAR START ---
+    with st.sidebar:
+        # 1. File Uploader (Vision)
+        st.header("Upload File")
+        uploaded_file = st.file_uploader("Context", type=["pdf", "png", "jpg", "txt"])
+        st.divider()
 
+        # 2. Calendar Section
+        st.header("📅 Calendar")
+        if st.button("Refresh Events"):
+            st.rerun()
+        
+        # Show events
+        events_text = get_calendar_events()
+        st.caption("Upcoming meetings:")
+        st.text(events_text) # Using st.text keeps the formatting clean
+        st.divider()
+
+        # 3. Long-Term Memory Section (NEW)
+        st.header("🧠 Memory Bank")
+        
+        # Only try to fetch if we are connected to Firebase
+        if db is not None:
+            # Use an expander so it doesn't clutter the screen
+            with st.expander("View Saved Memories"):
+                try:
+                    docs = db.collection("memories").stream()
+                    found_any = False
+                    for doc in docs:
+                        found_any = True
+                        data = doc.to_dict()
+                        # Display each memory in a little box
+                        st.info(f"📝 {data.get('text', 'Unknown')}")
+                    
+                    if not found_any:
+                        st.write("No memories saved yet.")
+                        
+                except Exception as e:
+                    st.error(f"Error reading memories: {e}")
+        else:
+            st.error("⚠️ Database Not Connected. Check Secrets.")
+    # --- SIDEBAR END ---
 # Chat
 if "messages" not in st.session_state: st.session_state.messages = []
 for msg in st.session_state.messages:
