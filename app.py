@@ -178,7 +178,6 @@ if user_input:
     file_data = process_file(uploaded_file) if uploaded_file else None
     
     # 2. Construct Prompt
-    
     # --- FIX: CALCULATE INDIA TIME ---
     india_time = datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
     # ---------------------------------
@@ -193,7 +192,11 @@ if user_input:
        {{"action": "schedule", "summary": "Meeting Name", "time": "YYYY-MM-DDTHH:MM:SS"}}
        (Current Date & Time in India: {india_time.strftime("%Y-%m-%d %H:%M:%S")})
        IMPORTANT: The user is in India (IST). Use the current India time above to calculate dates.
-    
+       
+    2. If user wants to SAVE MEMORY, output JSON:
+       {{"action": "save_memory", "text": "The fact to save"}}
+       
+    3. Else answer normally as a helpful assistant.
 
     """
     
