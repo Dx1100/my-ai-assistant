@@ -178,7 +178,7 @@ if user_input:
     file_data = process_file(uploaded_file) if uploaded_file else None
     
     # 2. Construct Prompt
-    Construct Prompt
+    
     # --- FIX: CALCULATE INDIA TIME ---
     india_time = datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
     # ---------------------------------
