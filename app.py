@@ -10,77 +10,113 @@ import tempfile
 import time
 import PyPDF2
 from PIL import Image
+import datetime
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="My AI Second Brain", layout="wide")
+st.set_page_config(page_title="My AI Jarvis", layout="wide")
 
 # 1. Setup Database (Firebase)
 if "FIREBASE_KEY" in st.secrets:
     key_info = st.secrets["FIREBASE_KEY"]
     if isinstance(key_info, str):
-        try:
-            key_dict = json.loads(key_info)
-        except:
-            st.error("Error decoding Firebase Key. Check Secrets.")
-            st.stop()
-    else:
-        key_dict = dict(key_info)
-
+        try: key_dict = json.loads(key_info)
+        except: st.stop()
+    else: key_dict = dict(key_info)
+    
     cred = credentials.Certificate(key_dict)
-    try:
-        firebase_admin.get_app()
-    except ValueError:
-        firebase_admin.initialize_app(cred)
+    try: firebase_admin.get_app()
+    except ValueError: firebase_admin.initialize_app(cred)
     db = firestore.client()
-else:
-    st.warning("⚠️ Database disconnected. Memory won't work.")
-    db = None
+else: db = None
 
-# 2. Setup Brain (Gemini)
+# 2. Setup Google Calendar
+SCOPES = ['https://www.googleapis.com/auth/calendar']
+cal_service = None
+
+# --- ENTER YOUR EMAIL HERE ---
+CALENDAR_EMAIL = 'calendar-bot@gen-lang-client-0464641507.iam.gserviceaccount.com'  # <--- CHANGE THIS!!!!
+
+if "GOOGLE_CALENDAR_KEY" in st.secrets:
+    try:
+        cal_info = st.secrets["GOOGLE_CALENDAR_KEY"]
+        if isinstance(cal_info, str):
+            cal_creds_dict = json.loads(cal_info)
+        else:
+            cal_creds_dict = dict(cal_info)
+            
+        creds = service_account.Credentials.from_service_account_info(
+            cal_creds_dict, scopes=SCOPES
+        )
+        cal_service = build('calendar', 'v3', credentials=creds)
+    except Exception as e:
+        st.error(f"Calendar Error: {e}")
+
+# 3. Setup Brain (Gemini)
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-else:
-    st.error("Missing Gemini API Key.")
-    st.stop()
 
-# USE THE STABLE ALIAS (High Quota)
 model_name = 'gemini-flash-latest'
 model = genai.GenerativeModel(model_name)
 
-# --- DATABASE FUNCTIONS ---
-def get_tasks():
-    """Fetch pending tasks"""
-    if not db: return []
-    try:
-        docs = db.collection('tasks').stream()
-        return [f"{doc.id}: {doc.to_dict().get('task')}" for doc in docs]
-    except: return []
+# --- FUNCTIONS ---
 
-def add_task(task_text):
-    """Save a task"""
-    if db: db.collection('tasks').add({'task': task_text, 'status': 'pending'})
+def get_calendar_events():
+    """Fetch next 5 upcoming events"""
+    if not cal_service: return "Calendar not connected."
+    try:
+        now = datetime.datetime.utcnow().isoformat() + 'Z'
+        events_result = cal_service.events().list(
+            calendarId=CALENDAR_EMAIL, timeMin=now,
+            maxResults=5, singleEvents=True,
+            orderBy='startTime').execute()
+        events = events_result.get('items', [])
+        
+        if not events: return "No upcoming events found."
+        
+        event_list = []
+        for event in events:
+            start = event['start'].get('dateTime', event['start'].get('date'))
+            event_list.append(f"📅 {start}: {event['summary']}")
+        return "\n".join(event_list)
+    except Exception as e:
+        return f"Error reading calendar: {e}"
+
+def add_calendar_event(summary, start_time_str):
+    """
+    Adds an event. Expects start_time_str in ISO format (YYYY-MM-DDTHH:MM:SS)
+    """
+    if not cal_service: return "Calendar not connected."
+    try:
+        # Simple parser: assumes 1 hour duration
+        start_dt = datetime.datetime.fromisoformat(start_time_str)
+        end_dt = start_dt + datetime.timedelta(hours=1)
+        
+        event = {
+            'summary': summary,
+            'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'Asia/Kolkata'},
+            'end': {'dateTime': end_dt.isoformat(), 'timeZone': 'Asia/Kolkata'},
+        }
+        
+        cal_service.events().insert(calendarId=CALENDAR_EMAIL, body=event).execute()
+        return f"✅ Scheduled '{summary}' for {start_time_str}"
+    except Exception as e:
+        return f"Failed to schedule: {e}"
 
 def get_memories():
-    """Fetch Long-Term Memories (RAG)"""
     if not db: return []
     try:
         docs = db.collection('memories').stream()
         return [doc.to_dict().get('fact') for doc in docs]
     except: return []
 
-def add_memory(fact_text):
-    """Save a permanent fact"""
-    if db: db.collection('memories').add({
-        'fact': fact_text, 
-        'timestamp': firestore.SERVER_TIMESTAMP
-    })
+def add_memory(fact):
+    if db: db.collection('memories').add({'fact': fact, 'timestamp': firestore.SERVER_TIMESTAMP})
 
-# --- HELPER FUNCTIONS ---
 def web_search(query):
-    try:
-        results = DDGS().text(query, max_results=3)
-        return str(results)
-    except: return "No internet results found."
+    try: return str(DDGS().text(query, max_results=3))
+    except: return "No internet."
 
 async def speak(text):
     communicate = edge_tts.Communicate(text, "en-IN-NeerjaNeural")
@@ -88,143 +124,98 @@ async def speak(text):
         await communicate.save(fp.name)
         return fp.name
 
-def process_file(uploaded):
-    """
-    Universal File Handler:
-    - PDF -> Returns Text
-    - XML/TXT/JSON -> Returns Text
-    - PNG/JPG -> Returns Image Object (For Gemini Vision)
-    """
+def ask_gemini(prompt):
     try:
-        # Handle Images
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"System Error: {str(e)}"
+
+def process_file(uploaded):
+    """Universal File Handler"""
+    try:
         if uploaded.type in ["image/png", "image/jpeg", "image/jpg"]:
             return Image.open(uploaded)
-        
-        # Handle PDF
         elif uploaded.type == "application/pdf":
             reader = PyPDF2.PdfReader(uploaded)
             return "".join([p.extract_text() for p in reader.pages])
-            
-        # Handle Text/Code/XML
         else:
             return uploaded.getvalue().decode("utf-8")
     except Exception as e:
         return f"Error reading file: {str(e)}"
 
-def ask_gemini(prompt_content):
-    """
-    CRASH PROTECTION: 
-    Catches 429 (Rate Limit) and 404 (Not Found) errors.
-    Accepts either a String (text only) or List (multimodal).
-    """
-    try:
-        response = model.generate_content(prompt_content)
-        return response.text
-    except Exception as e:
-        err_msg = str(e)
-        if "429" in err_msg or "ResourceExhausted" in err_msg:
-            return "⚠️ Speed limit reached. Please wait 20 seconds."
-        elif "NotFound" in err_msg:
-            return f"Error: Model {model_name} not found."
-        else:
-            return f"System Error: {err_msg}"
+# --- UI ---
+st.title("🤖 My AI Jarvis")
 
-# --- UI INTERFACE ---
-st.title("🧠 My AI Second Brain")
-
+# Sidebar
 with st.sidebar:
-    st.header("Upload Context")
-    uploaded_file = st.file_uploader("Upload File", type=["pdf", "png", "jpg", "xml", "txt", "json"])
-    
+    st.header("Upload File")
+    uploaded_file = st.file_uploader("Context", type=["pdf", "png", "jpg", "txt"])
     st.divider()
-    st.header("📝 Pending Tasks")
-    if st.button("Refresh Data"): st.rerun()
-    
-    tasks = get_tasks()
-    if tasks:
-        for t in tasks: st.write(f"• {t}")
-    else: st.write("No tasks.")
+    if st.button("Refresh Calendar"): st.rerun()
+    st.write("📅 **Upcoming Events:**")
+    st.write(get_calendar_events())
 
-    st.divider()
-    st.header("🧠 Long-Term Memories")
-    memories = get_memories()
-    if memories:
-        for m in memories: st.write(f"🔹 {m}")
-    else: st.write("I don't know anything about you yet.")
-
-# Chat History
+# Chat
 if "messages" not in st.session_state: st.session_state.messages = []
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]): st.write(msg["content"])
 
-# User Input
-user_input = st.chat_input("Type instruction (or use voice)...")
+user_input = st.chat_input("Type instruction...")
 
 if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"): st.write(user_input)
 
-    # 1. Process File
-    file_data = None
-    if uploaded_file:
-        file_data = process_file(uploaded_file)
+    # 1. Gather Context
+    memories = get_memories()
+    calendar_data = get_calendar_events()
+    file_data = process_file(uploaded_file) if uploaded_file else None
     
-    # 2. Build RAG Context (Text Only)
-    # We create the "Base Prompt" that includes your memories and tasks.
-    text_context = f"""
+    # 2. Construct Prompt
+    sys_prompt = f"""
     SYSTEM: You are a personal assistant.
-    USER MEMORIES (Facts about user): {memories}
-    CURRENT PENDING TASKS: {tasks}
+    USER MEMORIES: {memories}
+    CALENDAR: {calendar_data}
+    
+    INSTRUCTIONS:
+    1. If user wants to SCHEDULE meeting, output JSON:
+       {{"action": "schedule", "summary": "Meeting Name", "time": "YYYY-MM-DDTHH:MM:SS"}}
+       (Current Year: 2026. Current Time: {datetime.datetime.now()})
+    
+    2. If user wants to SAVE MEMORY, output JSON:
+       {{"action": "memory", "text": "The fact to save"}}
+       
+    3. Else answer normally.
     """
     
-    # 3. Router Logic
-    reply = ""
-    lower_input = user_input.lower()
+    full_prompt = [f"{sys_prompt} \n USER: {user_input}"]
+    if file_data:
+        if isinstance(file_data, Image.Image): full_prompt.append(file_data)
+        else: full_prompt[0] += f"\nFILE: {file_data}"
     
-    # CASE A: Save Memory
-    if "remember that" in lower_input or "remember i" in lower_input:
-        fact = user_input.replace("remember that", "").replace("remember", "").strip()
-        add_memory(fact)
-        reply = f"🧠 Memory Stored: {fact}"
+    # 3. Get Answer
+    reply = ask_gemini(full_prompt)
+    
+    # 4. Check for Actions (JSON)
+    final_response = reply
+    if "{" in reply and "action" in reply:
+        try:
+            clean_json = reply.replace("```json", "").replace("```", "").strip()
+            data = json.loads(clean_json)
+            
+            if data["action"] == "schedule":
+                final_response = add_calendar_event(data["summary"], data["time"])
+            elif data["action"] == "memory":
+                add_memory(data["text"])
+                final_response = f"🧠 Saved memory: {data['text']}"
+        except: pass
 
-    # CASE B: Save Task
-    elif "save task" in lower_input:
-        clean_task = user_input.replace("save task", "").strip()
-        add_task(clean_task)
-        reply = f"✅ Task Saved: {clean_task}"
-
-    # CASE C: Search
-    elif "search" in lower_input or "news" in lower_input:
-        st.status("Searching the web...", expanded=False)
-        web_res = web_search(user_input)
-        # Combine everything into a text prompt
-        full_prompt = f"{text_context} \n WEB RESULTS: {web_res} \n QUESTION: {user_input}"
-        reply = ask_gemini(full_prompt)
-
-    # CASE D: General Chat (Handles Images/Files)
-    else:
-        # If we have an image, we must send a LIST [text, image]
-        # If we have text file, we append it to the string.
-        
-        prompt_payload = []
-        
-        if isinstance(file_data, Image.Image):
-            # It's an image. Send [Context + Question, Image]
-            prompt_payload = [f"{text_context} \n QUESTION: {user_input}", file_data]
-        elif isinstance(file_data, str):
-            # It's a text file (PDF/XML). Add to string.
-            prompt_payload = [f"{text_context} \n FILE CONTENT: {file_data} \n QUESTION: {user_input}"]
-        else:
-            # No file. Just text.
-            prompt_payload = [f"{text_context} \n QUESTION: {user_input}"]
-
-        reply = ask_gemini(prompt_payload)
-
-    # 4. Output
+    # 5. Output
     with st.chat_message("assistant"):
-        st.write(reply)
-        if "⚠️" not in reply:
-            audio_path = asyncio.run(speak(reply.replace("*", "")))
+        st.write(final_response)
+        if "⚠️" not in final_response:
+            audio_path = asyncio.run(speak(final_response.replace("*", "")))
             st.audio(audio_path, autoplay=True)
     
-    st.session_state.messages.append({"role": "assistant", "content": reply})
+    st.session_state.messages.append({"role": "assistant", "content": final_response})
