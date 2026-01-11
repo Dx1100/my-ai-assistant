@@ -41,7 +41,7 @@ SCOPES = ['https://www.googleapis.com/auth/calendar']
 cal_service = None
 
 # --- ENTER YOUR EMAIL HERE ---
-CALENDAR_EMAIL = 'calendar-bot@gen-lang-client-0464641507.iam.gserviceaccount.com'  # <--- CHANGE THIS!!!!
+CALENDAR_EMAIL = 'mybusiness110010@gmail.com'  # <--- CHANGE THIS!!!!
 
 if "GOOGLE_CALENDAR_KEY" in st.secrets:
     try:
