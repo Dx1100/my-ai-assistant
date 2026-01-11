@@ -17,6 +17,11 @@ from googleapiclient.discovery import build
 # --- CONFIGURATION ---
 st.set_page_config(page_title="My AI Jarvis", layout="wide")
 
+# --- DEBUG LINES (Add these 2 lines) ---
+st.write("🔑 **I see these keys in your Secrets:**", list(st.secrets.keys()))
+st.write("Is GOOGLE_CALENDAR_KEY in there?", "GOOGLE_CALENDAR_KEY" in st.secrets)
+# ---------------------------------------
+
 # 1. Setup Database (Firebase)
 if "FIREBASE_KEY" in st.secrets:
     key_info = st.secrets["FIREBASE_KEY"]
