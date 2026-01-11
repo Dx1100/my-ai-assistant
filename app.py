@@ -17,11 +17,6 @@ from googleapiclient.discovery import build
 # --- CONFIGURATION ---
 st.set_page_config(page_title="My AI Jarvis", layout="wide")
 
-# --- DEBUG LINES (Add these 2 lines) ---
-st.write("🔑 **I see these keys in your Secrets:**", list(st.secrets.keys()))
-st.write("Is GOOGLE_CALENDAR_KEY in there?", "GOOGLE_CALENDAR_KEY" in st.secrets)
-# ---------------------------------------
-
 # 1. Setup Database (Firebase)
 if "FIREBASE_KEY" in st.secrets:
     key_info = st.secrets["FIREBASE_KEY"]
@@ -30,18 +25,23 @@ if "FIREBASE_KEY" in st.secrets:
         except: st.stop()
     else: key_dict = dict(key_info)
     
-    cred = credentials.Certificate(key_dict)
-    try: firebase_admin.get_app()
-    except ValueError: firebase_admin.initialize_app(cred)
+    try: 
+        # Check if app already exists to avoid duplication error
+        app = firebase_admin.get_app()
+    except ValueError: 
+        cred = credentials.Certificate(key_dict)
+        app = firebase_admin.initialize_app(cred)
+    
     db = firestore.client()
-else: db = None
+else: 
+    db = None
 
 # 2. Setup Google Calendar
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 cal_service = None
 
 # --- ENTER YOUR EMAIL HERE ---
-CALENDAR_EMAIL = 'mybusiness110010@gmail.com'  # <--- CHANGE THIS!!!!
+CALENDAR_EMAIL = 'mybusiness110010@gmail.com' 
 
 if "GOOGLE_CALENDAR_KEY" in st.secrets:
     try:
@@ -62,7 +62,7 @@ if "GOOGLE_CALENDAR_KEY" in st.secrets:
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
-model_name = 'gemini-flash-latest'
+model_name = 'gemini-1.5-flash'
 model = genai.GenerativeModel(model_name)
 
 # --- FUNCTIONS ---
@@ -89,12 +89,9 @@ def get_calendar_events():
         return f"Error reading calendar: {e}"
 
 def add_calendar_event(summary, start_time_str):
-    """
-    Adds an event. Expects start_time_str in ISO format (YYYY-MM-DDTHH:MM:SS)
-    """
+    """Adds an event. Expects ISO format."""
     if not cal_service: return "Calendar not connected."
     try:
-        # Simple parser: assumes 1 hour duration
         start_dt = datetime.datetime.fromisoformat(start_time_str)
         end_dt = start_dt + datetime.timedelta(hours=1)
         
@@ -110,18 +107,18 @@ def add_calendar_event(summary, start_time_str):
         return f"Failed to schedule: {e}"
 
 def get_memories():
+    """Read memories from Firebase"""
     if not db: return []
     try:
         docs = db.collection('memories').stream()
-        return [doc.to_dict().get('fact') for doc in docs]
+        # Fix: Read 'text', not 'fact'
+        return [doc.to_dict().get('text') for doc in docs]
     except: return []
 
-def add_memory(fact):
-    if db: db.collection('memories').add({'fact': fact, 'timestamp': firestore.SERVER_TIMESTAMP})
-
-def web_search(query):
-    try: return str(DDGS().text(query, max_results=3))
-    except: return "No internet."
+def add_memory(text):
+    """Save memory to Firebase"""
+    # Fix: Save as 'text' to match the Sidebar reader
+    if db: db.collection('memories').add({'text': text, 'timestamp': firestore.SERVER_TIMESTAMP})
 
 async def speak(text):
     communicate = edge_tts.Communicate(text, "en-IN-NeerjaNeural")
@@ -137,7 +134,6 @@ def ask_gemini(prompt):
         return f"System Error: {str(e)}"
 
 def process_file(uploaded):
-    """Universal File Handler"""
     try:
         if uploaded.type in ["image/png", "image/jpeg", "image/jpg"]:
             return Image.open(uploaded)
@@ -154,48 +150,40 @@ st.title("🤖 My AI Jarvis")
 
 # --- SIDEBAR START ---
 with st.sidebar:
-        # 1. File Uploader (Vision)
-        st.header("Upload File")
-        uploaded_file = st.file_uploader("Context", type=["pdf", "png", "jpg", "txt"])
-        st.divider()
+    st.header("Upload File")
+    uploaded_file = st.file_uploader("Context", type=["pdf", "png", "jpg", "txt"])
+    st.divider()
 
-        # 2. Calendar Section
-        st.header("📅 Calendar")
-        if st.button("Refresh Events"):
-            st.rerun()
-        
-        # Show events
-        events_text = get_calendar_events()
-        st.caption("Upcoming meetings:")
-        st.text(events_text) # Using st.text keeps the formatting clean
-        st.divider()
+    st.header("📅 Calendar")
+    if st.button("Refresh Events"):
+        st.rerun()
+    
+    events_text = get_calendar_events()
+    st.caption("Upcoming meetings:")
+    st.text(events_text) 
+    st.divider()
 
-        # 3. Long-Term Memory Section (NEW)
-        st.header("🧠 Memory Bank")
-        
-        # Only try to fetch if we are connected to Firebase
-        if db is not None:
-            # Use an expander so it doesn't clutter the screen
-            with st.expander("View Saved Memories"):
-                try:
-                    docs = db.collection("memories").stream()
-                    found_any = False
-                    for doc in docs:
-                        found_any = True
-                        data = doc.to_dict()
-                        # Display each memory in a little box
-                        st.info(f"📝 {data.get('text', 'Unknown')}")
-                    
-                    if not found_any:
-                        st.write("No memories saved yet.")
-                        
-                except Exception as e:
-                    st.error(f"Error reading memories: {e}")
-        else:
-            st.error("⚠️ Database Not Connected. Check Secrets.")
-    # --- SIDEBAR END ---
+    st.header("🧠 Memory Bank")
+    if db is not None:
+        with st.expander("View Saved Memories"):
+            try:
+                docs = db.collection("memories").stream()
+                found_any = False
+                for doc in docs:
+                    found_any = True
+                    data = doc.to_dict()
+                    # Fix: Read 'text' key
+                    st.info(f"📝 {data.get('text', 'Unknown')}")
+                
+                if not found_any:
+                    st.write("No memories saved yet.")
+            except Exception as e:
+                st.error(f"Error reading memories: {e}")
+    else:
+        st.error("⚠️ Database Not Connected. Check Secrets.")
+# --- SIDEBAR END ---
 
-# Chat
+# Chat Logic
 if "messages" not in st.session_state: st.session_state.messages = []
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]): st.write(msg["content"])
@@ -211,10 +199,8 @@ if user_input:
     calendar_data = get_calendar_events()
     file_data = process_file(uploaded_file) if uploaded_file else None
     
-    # 2. Construct Prompt
-    # --- FIX: CALCULATE INDIA TIME ---
+    # 2. Construct Prompt (With India Time Fix)
     india_time = datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
-    # ---------------------------------
 
     sys_prompt = f"""
     SYSTEM: You are a personal assistant.
@@ -231,7 +217,6 @@ if user_input:
        {{"action": "save_memory", "text": "The fact to save"}}
        
     3. Else answer normally as a helpful assistant.
-
     """
     
     full_prompt = [f"{sys_prompt} \n USER: {user_input}"]
@@ -251,7 +236,9 @@ if user_input:
             
             if data["action"] == "schedule":
                 final_response = add_calendar_event(data["summary"], data["time"])
-            elif data["action"] == "memory":
+            
+            # Fix: Check for 'save_memory' to match prompt
+            elif data["action"] == "save_memory":
                 add_memory(data["text"])
                 final_response = f"🧠 Saved memory: {data['text']}"
         except: pass
