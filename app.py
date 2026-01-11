@@ -178,6 +178,11 @@ if user_input:
     file_data = process_file(uploaded_file) if uploaded_file else None
     
     # 2. Construct Prompt
+    Construct Prompt
+    # --- FIX: CALCULATE INDIA TIME ---
+    india_time = datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
+    # ---------------------------------
+
     sys_prompt = f"""
     SYSTEM: You are a personal assistant.
     USER MEMORIES: {memories}
@@ -186,7 +191,8 @@ if user_input:
     INSTRUCTIONS:
     1. If user wants to SCHEDULE meeting, output JSON:
        {{"action": "schedule", "summary": "Meeting Name", "time": "YYYY-MM-DDTHH:MM:SS"}}
-       (Current Year: 2026. Current Time: {datetime.datetime.now()})
+       (Current Date & Time in India: {india_time.strftime("%Y-%m-%d %H:%M:%S")})
+       IMPORTANT: The user is in India (IST). Use the current India time above to calculate dates.
     
     2. If user wants to SAVE MEMORY, output JSON:
        {{"action": "memory", "text": "The fact to save"}}
