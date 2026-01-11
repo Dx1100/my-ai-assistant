@@ -153,7 +153,7 @@ def process_file(uploaded):
 st.title("🤖 My AI Jarvis")
 
 # --- SIDEBAR START ---
-    with st.sidebar:
+        with st.sidebar:
         # 1. File Uploader (Vision)
         st.header("Upload File")
         uploaded_file = st.file_uploader("Context", type=["pdf", "png", "jpg", "txt"])
@@ -194,6 +194,7 @@ st.title("🤖 My AI Jarvis")
         else:
             st.error("⚠️ Database Not Connected. Check Secrets.")
     # --- SIDEBAR END ---
+
 # Chat
 if "messages" not in st.session_state: st.session_state.messages = []
 for msg in st.session_state.messages:
