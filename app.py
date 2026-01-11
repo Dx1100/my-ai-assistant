@@ -153,7 +153,7 @@ def process_file(uploaded):
 st.title("🤖 My AI Jarvis")
 
 # --- SIDEBAR START ---
-        with st.sidebar:
+with st.sidebar:
         # 1. File Uploader (Vision)
         st.header("Upload File")
         uploaded_file = st.file_uploader("Context", type=["pdf", "png", "jpg", "txt"])
