@@ -26,7 +26,6 @@ if "FIREBASE_KEY" in st.secrets:
     else: key_dict = dict(key_info)
     
     try: 
-        # Check if app already exists to avoid duplication error
         app = firebase_admin.get_app()
     except ValueError: 
         cred = credentials.Certificate(key_dict)
@@ -39,8 +38,6 @@ else:
 # 2. Setup Google Calendar
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 cal_service = None
-
-# --- ENTER YOUR EMAIL HERE ---
 CALENDAR_EMAIL = 'mybusiness110010@gmail.com' 
 
 if "GOOGLE_CALENDAR_KEY" in st.secrets:
@@ -62,13 +59,29 @@ if "GOOGLE_CALENDAR_KEY" in st.secrets:
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
+# Keeping the model that works for you
 model_name = 'gemini-flash-latest'
 model = genai.GenerativeModel(model_name)
 
 # --- FUNCTIONS ---
 
+def web_search(query):
+    """Real-time Search using DuckDuckGo"""
+    try:
+        # Fetch 3 results
+        results = DDGS().text(query, max_results=3)
+        if not results:
+            return "No results found."
+        
+        # Format results for the AI
+        search_data = ""
+        for res in results:
+            search_data += f"- {res['title']}: {res['body']}\n"
+        return search_data
+    except Exception as e:
+        return f"Internet Error: {e}"
+
 def get_calendar_events():
-    """Fetch next 5 upcoming events"""
     if not cal_service: return "Calendar not connected."
     try:
         now = datetime.datetime.utcnow().isoformat() + 'Z'
@@ -89,7 +102,6 @@ def get_calendar_events():
         return f"Error reading calendar: {e}"
 
 def add_calendar_event(summary, start_time_str):
-    """Adds an event. Expects ISO format."""
     if not cal_service: return "Calendar not connected."
     try:
         start_dt = datetime.datetime.fromisoformat(start_time_str)
@@ -107,17 +119,13 @@ def add_calendar_event(summary, start_time_str):
         return f"Failed to schedule: {e}"
 
 def get_memories():
-    """Read memories from Firebase"""
     if not db: return []
     try:
         docs = db.collection('memories').stream()
-        # Fix: Read 'text', not 'fact'
         return [doc.to_dict().get('text') for doc in docs]
     except: return []
 
 def add_memory(text):
-    """Save memory to Firebase"""
-    # Fix: Save as 'text' to match the Sidebar reader
     if db: db.collection('memories').add({'text': text, 'timestamp': firestore.SERVER_TIMESTAMP})
 
 async def speak(text):
@@ -172,7 +180,6 @@ with st.sidebar:
                 for doc in docs:
                     found_any = True
                     data = doc.to_dict()
-                    # Fix: Read 'text' key
                     st.info(f"📝 {data.get('text', 'Unknown')}")
                 
                 if not found_any:
@@ -199,7 +206,7 @@ if user_input:
     calendar_data = get_calendar_events()
     file_data = process_file(uploaded_file) if uploaded_file else None
     
-    # 2. Construct Prompt (With India Time Fix)
+    # 2. Construct Prompt
     india_time = datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
 
     sys_prompt = f"""
@@ -208,15 +215,17 @@ if user_input:
     CALENDAR: {calendar_data}
     
     INSTRUCTIONS:
-    1. If user wants to SCHEDULE meeting, output JSON:
-       {{"action": "schedule", "summary": "Meeting Name", "time": "YYYY-MM-DDTHH:MM:SS"}}
-       (Current Date & Time in India: {india_time.strftime("%Y-%m-%d %H:%M:%S")})
-       IMPORTANT: The user is in India (IST). Use the current India time above to calculate dates.
+    1. If user asks for REAL-TIME info (news, prices, research, weather), output JSON:
+       {{"action": "search", "query": "The search keywords"}}
        
-    2. If user wants to SAVE MEMORY, output JSON:
+    2. If user wants to SCHEDULE meeting, output JSON:
+       {{"action": "schedule", "summary": "Meeting Name", "time": "YYYY-MM-DDTHH:MM:SS"}}
+       (Current India Time: {india_time.strftime("%Y-%m-%d %H:%M:%S")})
+       
+    3. If user wants to SAVE MEMORY, output JSON:
        {{"action": "save_memory", "text": "The fact to save"}}
        
-    3. Else answer normally as a helpful assistant.
+    4. Else answer normally.
     """
     
     full_prompt = [f"{sys_prompt} \n USER: {user_input}"]
@@ -224,26 +233,52 @@ if user_input:
         if isinstance(file_data, Image.Image): full_prompt.append(file_data)
         else: full_prompt[0] += f"\nFILE: {file_data}"
     
-    # 3. Get Answer
+    # 3. First Attempt (Ask Gemini)
     reply = ask_gemini(full_prompt)
     
-    # 4. Check for Actions (JSON)
+    # 4. Action Handler (The "Double Hop")
     final_response = reply
+    
+    # Check if the AI wants to take an action
     if "{" in reply and "action" in reply:
         try:
+            # Clean up JSON
             clean_json = reply.replace("```json", "").replace("```", "").strip()
             data = json.loads(clean_json)
             
-            if data["action"] == "schedule":
+            # --- ACTION: SEARCH (The New Power) ---
+            if data["action"] == "search":
+                with st.chat_message("assistant"):
+                    with st.status(f"🔎 Searching: {data['query']}...", expanded=True) as status:
+                        # 1. Run the Search
+                        search_result = web_search(data["query"])
+                        status.write("Reading results...")
+                        
+                        # 2. Feed results back to Gemini (Round 2)
+                        research_prompt = f"""
+                        {sys_prompt}
+                        USER ASKED: {user_input}
+                        SEARCH TOOL RESULT: {search_result}
+                        
+                        INSTRUCTION: Answer the user's question using the SEARCH RESULT above.
+                        Keep it concise and relevant to the Indian context if applicable.
+                        """
+                        final_response = ask_gemini(research_prompt)
+                        status.update(label="✅ Found it!", state="complete", expanded=False)
+
+            # --- ACTION: CALENDAR ---
+            elif data["action"] == "schedule":
                 final_response = add_calendar_event(data["summary"], data["time"])
             
-            # Fix: Check for 'save_memory' to match prompt
+            # --- ACTION: MEMORY ---
             elif data["action"] == "save_memory":
                 add_memory(data["text"])
                 final_response = f"🧠 Saved memory: {data['text']}"
-        except: pass
+                
+        except Exception as e:
+            pass
 
-    # 5. Output
+    # 5. Output Final Answer
     with st.chat_message("assistant"):
         st.write(final_response)
         if "⚠️" not in final_response:
