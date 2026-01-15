@@ -66,30 +66,27 @@ model = genai.GenerativeModel(model_name)
 # --- FUNCTIONS ---
 
 def web_search(query):
-    """Brute Force Search (Tries multiple methods)"""
+    """Robust Search Function (Fixed for Cloud)"""
     try:
-        # Method 1: Try the 'html' backend (Looks like a browser)
-        # This is usually the most robust for cloud servers
+        # FIX: We use a simple context manager without 'backend' args 
+        # because the latest library version doesn't support them.
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, region='in-en', backend='html', max_results=4))
-        
-        # Method 2: If HTML fails, try the 'lite' backend (Lighter version)
-        if not results:
-             with DDGS() as ddgs:
-                results = list(ddgs.text(query, region='in-en', backend='lite', max_results=4))
+            # max_results=5 ensures we get enough data
+            results = list(ddgs.text(query, max_results=5))
         
         if not results:
-            return "Search Tool: DuckDuckGo blocked the request. Try again later."
+            return "Search Tool: No results found. (Try broader keywords)"
         
         search_data = ""
         for res in results:
+            # We include the Link so the AI can verify the source
             search_data += f"Title: {res['title']}\nSnippet: {res['body']}\nLink: {res['href']}\n\n"
             
         return search_data
 
     except Exception as e:
         return f"Internet Error: {e}"
-        
+
 def get_calendar_events():
     if not cal_service: return "Calendar not connected."
     try:
@@ -218,7 +215,6 @@ if user_input:
     # 2. Construct Prompt
     india_time = datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
     
-    # We remove the date from the search query instruction to avoid "Zero Results"
     sys_prompt = f"""
     SYSTEM: You are a personal assistant.
     USER MEMORIES: {memories}
