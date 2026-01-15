@@ -66,17 +66,21 @@ model = genai.GenerativeModel(model_name)
 # --- FUNCTIONS ---
 
 def web_search(query):
-    """Robust Real-time Search"""
+    """Brute Force Search (Tries multiple methods)"""
     try:
-        # Using a Context Manager is safer and more reliable
+        # Method 1: Try the 'html' backend (Looks like a browser)
+        # This is usually the most robust for cloud servers
         with DDGS() as ddgs:
-            # We request 4 results and convert the generator to a list immediately
-            results = list(ddgs.text(query, max_results=4))
+            results = list(ddgs.text(query, region='in-en', backend='html', max_results=4))
+        
+        # Method 2: If HTML fails, try the 'lite' backend (Lighter version)
+        if not results:
+             with DDGS() as ddgs:
+                results = list(ddgs.text(query, region='in-en', backend='lite', max_results=4))
         
         if not results:
-            return "Search Tool: No results found on the internet."
+            return "Search Tool: DuckDuckGo blocked the request. Try again later."
         
-        # Format the results cleanly for the AI to read
         search_data = ""
         for res in results:
             search_data += f"Title: {res['title']}\nSnippet: {res['body']}\nLink: {res['href']}\n\n"
