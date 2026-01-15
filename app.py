@@ -66,21 +66,26 @@ model = genai.GenerativeModel(model_name)
 # --- FUNCTIONS ---
 
 def web_search(query):
-    """Real-time Search using DuckDuckGo"""
+    """Robust Real-time Search"""
     try:
-        # Fetch 3 results
-        results = DDGS().text(query, max_results=3)
-        if not results:
-            return "No results found."
+        # Using a Context Manager is safer and more reliable
+        with DDGS() as ddgs:
+            # We request 4 results and convert the generator to a list immediately
+            results = list(ddgs.text(query, max_results=4))
         
-        # Format results for the AI
+        if not results:
+            return "Search Tool: No results found on the internet."
+        
+        # Format the results cleanly for the AI to read
         search_data = ""
         for res in results:
-            search_data += f"- {res['title']}: {res['body']}\n"
+            search_data += f"Title: {res['title']}\nSnippet: {res['body']}\nLink: {res['href']}\n\n"
+            
         return search_data
+
     except Exception as e:
         return f"Internet Error: {e}"
-
+        
 def get_calendar_events():
     if not cal_service: return "Calendar not connected."
     try:
