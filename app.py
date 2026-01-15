@@ -208,19 +208,21 @@ if user_input:
     
     # 2. Construct Prompt
     india_time = datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
+    date_str = india_time.strftime("%d %B %Y") # e.g., "16 January 2026"
 
     sys_prompt = f"""
     SYSTEM: You are a personal assistant.
     USER MEMORIES: {memories}
     CALENDAR: {calendar_data}
+    TODAY'S DATE: {date_str}
     
     INSTRUCTIONS:
-    1. If user asks for REAL-TIME info (news, prices, research, weather), output JSON:
-       {{"action": "search", "query": "The search keywords"}}
+    1. If user asks for REAL-TIME info (news, prices, research), output JSON:
+       {{"action": "search", "query": "Specific keywords + Year/Month"}}
+       Example: Use "AI news India {date_str}" instead of just "news".
        
     2. If user wants to SCHEDULE meeting, output JSON:
        {{"action": "schedule", "summary": "Meeting Name", "time": "YYYY-MM-DDTHH:MM:SS"}}
-       (Current India Time: {india_time.strftime("%Y-%m-%d %H:%M:%S")})
        
     3. If user wants to SAVE MEMORY, output JSON:
        {{"action": "save_memory", "text": "The fact to save"}}
