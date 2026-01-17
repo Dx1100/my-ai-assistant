@@ -16,18 +16,7 @@ from googleapiclient.discovery import build
 # --- CONFIGURATION ---
 st.set_page_config(page_title="My AI Jarvis", layout="wide")
 
-# Add this right after st.set_page_config...
-if "GOOGLE_SEARCH_KEY" in st.secrets:
-    st.success("✅ Search Key Found!")
-else:
-    st.error("❌ Search Key Missing from Secrets")
-
-if "GOOGLE_SEARCH_CX" in st.secrets:
-    st.success("✅ Search ID Found!")
-else:
-    st.error("❌ Search ID Missing from Secrets")
-
-# 1. Setup Database (Firebase)
+# 1. Setup Database (Firebase - Long Term Memory)
 if "FIREBASE_KEY" in st.secrets:
     key_info = st.secrets["FIREBASE_KEY"]
     if isinstance(key_info, str):
@@ -69,10 +58,7 @@ if "GOOGLE_CALENDAR_KEY" in st.secrets:
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
-# --- MODEL SELECTION (SAFE MODE) ---
-# We use 'gemini-pro' because it is the most widely available v1.0 model.
-# If this works, we can try upgrading to Flash later.
-# Using the powerful Gemini 2.0 Flash model from your list
+# USE THE SMART MODEL (Gemini 2.0 Flash)
 model_name = 'models/gemini-2.0-flash'
 model = genai.GenerativeModel(model_name)
 
@@ -85,12 +71,9 @@ def google_search(query):
     
     try:
         service = build("customsearch", "v1", developerKey=st.secrets["GOOGLE_SEARCH_KEY"])
-        # num=4 fetches top 4 results
         result = service.cse().list(q=query, cx=st.secrets["GOOGLE_SEARCH_CX"], num=4).execute()
-        
         items = result.get('items', [])
-        if not items:
-            return "No results found on Google."
+        if not items: return "No results found on Google."
             
         search_data = ""
         for item in items:
@@ -98,7 +81,6 @@ def google_search(query):
             snippet = item.get('snippet', 'No Snippet')
             link = item.get('link', 'No Link')
             search_data += f"Title: {title}\nSnippet: {snippet}\nLink: {link}\n\n"
-            
         return search_data
     except Exception as e:
         return f"Google Search Error: {e}"
@@ -112,7 +94,6 @@ def get_calendar_events():
             maxResults=5, singleEvents=True,
             orderBy='startTime').execute()
         events = events_result.get('items', [])
-        
         if not events: return "No upcoming events found."
         
         event_list = []
@@ -128,27 +109,31 @@ def add_calendar_event(summary, start_time_str):
     try:
         start_dt = datetime.datetime.fromisoformat(start_time_str)
         end_dt = start_dt + datetime.timedelta(hours=1)
-        
         event = {
             'summary': summary,
             'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'Asia/Kolkata'},
             'end': {'dateTime': end_dt.isoformat(), 'timeZone': 'Asia/Kolkata'},
         }
-        
         cal_service.events().insert(calendarId=CALENDAR_EMAIL, body=event).execute()
         return f"✅ Scheduled '{summary}' for {start_time_str}"
     except Exception as e:
         return f"Failed to schedule: {e}"
 
+# --- MEMORY FUNCTIONS (THE SECOND BRAIN) ---
 def get_memories():
     if not db: return []
     try:
-        docs = db.collection('memories').stream()
+        # Fetch all memories (In a pro app, we would search these, but for now we fetch all)
+        docs = db.collection('memories').order_by('timestamp', direction=firestore.Query.DESCENDING).limit(10).stream()
         return [doc.to_dict().get('text') for doc in docs]
     except: return []
 
 def add_memory(text):
-    if db: db.collection('memories').add({'text': text, 'timestamp': firestore.SERVER_TIMESTAMP})
+    if db: 
+        db.collection('memories').add({
+            'text': text, 
+            'timestamp': firestore.SERVER_TIMESTAMP
+        })
 
 async def speak(text):
     communicate = edge_tts.Communicate(text, "en-IN-NeerjaNeural")
@@ -176,147 +161,114 @@ def process_file(uploaded):
         return f"Error reading file: {str(e)}"
 
 # --- UI ---
-st.title("🤖 My AI Jarvis")
+st.title("🤖 My AI Jarvis (Second Brain)")
 
-# --- SIDEBAR START ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.header("Upload File")
-    uploaded_file = st.file_uploader("Context", type=["pdf", "png", "jpg", "txt"])
+    st.header("Upload Context")
+    uploaded_file = st.file_uploader("File", type=["pdf", "png", "jpg", "txt"])
     st.divider()
 
-    st.header("🔧 Diagnostics")
-    if st.button("Check Available Models"):
-        try:
-            available_models = []
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    available_models.append(m.name)
-            st.success("Your Key can access these models:")
-            st.code("\n".join(available_models))
-        except Exception as e:
-            st.error(f"Error checking models: {e}")
-
-    st.header("📅 Calendar")
-    if st.button("Refresh Events"):
-        st.rerun()
-    
-    events_text = get_calendar_events()
-    st.caption("Upcoming meetings:")
-    st.text(events_text) 
-    st.divider()
-
-    st.header("🧠 Memory Bank")
-    if db is not None:
-        with st.expander("View Saved Memories"):
-            try:
-                docs = db.collection("memories").stream()
-                found_any = False
-                for doc in docs:
-                    found_any = True
-                    data = doc.to_dict()
-                    st.info(f"📝 {data.get('text', 'Unknown')}")
-                
-                if not found_any:
-                    st.write("No memories saved yet.")
-            except Exception as e:
-                st.error(f"Error reading memories: {e}")
+    st.header("🧠 Long-Term Memory")
+    if db:
+        with st.expander("View Recent Memories"):
+            mems = get_memories()
+            for m in mems:
+                st.info(f"📝 {m}")
     else:
-        st.error("⚠️ Database Not Connected. Check Secrets.")
-# --- SIDEBAR END ---
+        st.error("Database Disconnected")
 
-# Chat Logic
+# --- CHAT LOGIC ---
 if "messages" not in st.session_state: st.session_state.messages = []
+
+# 1. Display History
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]): st.write(msg["content"])
 
+# 2. Handle New Input
 user_input = st.chat_input("Type instruction...")
 
 if user_input:
+    # A. Display User Message
     st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"): st.write(user_input)
 
-    # 1. Gather Context
-    memories = get_memories()
+    # B. Gather Context
+    memories = get_memories() # Gets last 10 permanent memories
     calendar_data = get_calendar_events()
-    file_data = process_file(uploaded_file) if uploaded_file else None
     
-    # 2. Construct Prompt
+    # C. Build Conversation History (INCREASED TO 15)
+    history_str = ""
+    # We take the last 15 messages so it remembers the immediate conversation flow
+    for msg in st.session_state.messages[-15:]: 
+        history_str += f"{msg['role'].upper()}: {msg['content']}\n"
+    
     india_time = datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
     
     sys_prompt = f"""
-    SYSTEM: You are a personal assistant.
-    USER MEMORIES: {memories}
-    CALENDAR: {calendar_data}
+    SYSTEM: You are Jarvis, a personal AI assistant and Second Brain.
+    
+    --- YOUR SECOND BRAIN (PERMANENT KNOWLEDGE) ---
+    The user has explicitly saved these facts. Use them to answer questions:
+    {memories}
+    
+    --- CALENDAR ---
+    {calendar_data}
+    
+    --- CURRENT CONTEXT (SHORT TERM MEMORY) ---
+    {history_str}
+    
     TODAY'S DATE: {india_time.strftime("%d %B %Y")}
     
     INSTRUCTIONS:
-    1. If user asks for REAL-TIME info (news, prices, research), output JSON:
-       {{"action": "search", "query": "The search keywords"}}
-       IMPORTANT: Do NOT include specific dates (like "16 January") in the query unless the user asks for history.
-       
-    2. If user wants to SCHEDULE meeting, output JSON:
-       {{"action": "schedule", "summary": "Meeting Name", "time": "YYYY-MM-DDTHH:MM:SS"}}
-       
-    3. If user wants to SAVE MEMORY, output JSON:
-       {{"action": "save_memory", "text": "The fact to save"}}
-       
-    4. Else answer normally.
+    1. If user asks for REAL-TIME info, output JSON: {{"action": "search", "query": "..."}}
+    2. If user wants to SCHEDULE meeting, output JSON: {{"action": "schedule", "summary": "...", "time": "..."}}
+    3. If user says "Save this" or "Remember that", output JSON: {{"action": "save_memory", "text": "The exact info to save"}}
+    4. Otherwise, answer helpfully using the HISTORY and SECOND BRAIN.
     """
     
-    full_prompt = [f"{sys_prompt} \n USER: {user_input}"]
-    if file_data:
-        if isinstance(file_data, Image.Image): full_prompt.append(file_data)
-        else: full_prompt[0] += f"\nFILE: {file_data}"
+    # D. First Attempt
+    reply = ask_gemini(sys_prompt)
     
-    # 3. First Attempt (Ask Gemini)
-    reply = ask_gemini(full_prompt)
-    
-    # 4. Action Handler (The "Double Hop")
+    # E. Action Handler
     final_response = reply
     
-    # Check if the AI wants to take an action
     if "{" in reply and "action" in reply:
         try:
-            # Clean up JSON
             clean_json = reply.replace("```json", "").replace("```", "").strip()
             data = json.loads(clean_json)
             
-            # --- ACTION: SEARCH (GOOGLE) ---
             if data["action"] == "search":
                 with st.chat_message("assistant"):
                     with st.status(f"🔎 Google Search: {data['query']}...", expanded=True) as status:
-                        # 1. Run the Google Search
                         search_result = google_search(data["query"])
                         status.write("Reading results...")
                         
-                        # 2. Feed results back to Gemini (Round 2)
                         research_prompt = f"""
                         {sys_prompt}
-                        USER ASKED: {user_input}
                         SEARCH TOOL RESULT: {search_result}
-                        
-                        INSTRUCTION: Answer the user's question using the SEARCH RESULT above.
+                        INSTRUCTION: Answer based on the SEARCH RESULT.
                         """
                         final_response = ask_gemini(research_prompt)
                         status.update(label="✅ Found it!", state="complete", expanded=False)
 
-            # --- ACTION: CALENDAR ---
             elif data["action"] == "schedule":
                 final_response = add_calendar_event(data["summary"], data["time"])
             
-            # --- ACTION: MEMORY ---
             elif data["action"] == "save_memory":
                 add_memory(data["text"])
-                final_response = f"🧠 Saved memory: {data['text']}"
+                final_response = f"🧠 I have saved this to your Second Brain: '{data['text']}'"
                 
         except Exception as e:
             pass
 
-    # 5. Output Final Answer
+    # F. Output
     with st.chat_message("assistant"):
         st.write(final_response)
-        if "⚠️" not in final_response and "System Error" not in final_response:
-            audio_path = asyncio.run(speak(final_response.replace("*", "")))
-            st.audio(audio_path, autoplay=True)
+        if len(final_response) > 20 and "Warning" not in final_response: 
+            try:
+                audio_path = asyncio.run(speak(final_response.replace("*", "")))
+                st.audio(audio_path, autoplay=True)
+            except: pass
     
     st.session_state.messages.append({"role": "assistant", "content": final_response})
