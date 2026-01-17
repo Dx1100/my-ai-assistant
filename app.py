@@ -62,7 +62,8 @@ if "GEMINI_API_KEY" in st.secrets:
 # Try the "latest" alias which often fixes the 404 error
 # The "Ol' Reliable" (Standard v1.0 model)
 # Use the specific latest Flash version (Fastest & Cheapest)
-model_name = 'gemini-1.5-flash-latest' 
+# The stable version string for 1.5 Flash
+model_name = 'gemini-1.5-flash-001'
 model = genai.GenerativeModel(model_name)
 
 # --- FUNCTIONS ---
