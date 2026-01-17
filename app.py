@@ -2,7 +2,6 @@ import streamlit as st
 import google.generativeai as genai
 import firebase_admin
 from firebase_admin import credentials, firestore
-from duckduckgo_search import DDGS
 import edge_tts
 import asyncio
 import json
@@ -59,33 +58,36 @@ if "GOOGLE_CALENDAR_KEY" in st.secrets:
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
-# Keeping the model that works for you
-model_name = 'gemini-flash-latest'
+# Use 'gemini-1.5-flash' (It is faster and cheaper on quota than Pro)
+model_name = 'gemini-1.5-flash' 
 model = genai.GenerativeModel(model_name)
 
 # --- FUNCTIONS ---
 
-def web_search(query):
-    """Robust Search Function (Fixed for Cloud)"""
+def google_search(query):
+    """Official Google Custom Search API"""
+    if "GOOGLE_SEARCH_KEY" not in st.secrets or "GOOGLE_SEARCH_CX" not in st.secrets:
+        return "Error: Google Search Keys missing in Secrets."
+    
     try:
-        # FIX: We use a simple context manager without 'backend' args 
-        # because the latest library version doesn't support them.
-        with DDGS() as ddgs:
-            # max_results=5 ensures we get enough data
-            results = list(ddgs.text(query, max_results=5))
+        service = build("customsearch", "v1", developerKey=st.secrets["GOOGLE_SEARCH_KEY"])
+        # num=4 fetches top 4 results
+        result = service.cse().list(q=query, cx=st.secrets["GOOGLE_SEARCH_CX"], num=4).execute()
         
-        if not results:
-            return "Search Tool: No results found. (Try broader keywords)"
-        
+        items = result.get('items', [])
+        if not items:
+            return "No results found on Google."
+            
         search_data = ""
-        for res in results:
-            # We include the Link so the AI can verify the source
-            search_data += f"Title: {res['title']}\nSnippet: {res['body']}\nLink: {res['href']}\n\n"
+        for item in items:
+            title = item.get('title', 'No Title')
+            snippet = item.get('snippet', 'No Snippet')
+            link = item.get('link', 'No Link')
+            search_data += f"Title: {title}\nSnippet: {snippet}\nLink: {link}\n\n"
             
         return search_data
-
     except Exception as e:
-        return f"Internet Error: {e}"
+        return f"Google Search Error: {e}"
 
 def get_calendar_events():
     if not cal_service: return "Calendar not connected."
@@ -225,7 +227,6 @@ if user_input:
     1. If user asks for REAL-TIME info (news, prices, research), output JSON:
        {{"action": "search", "query": "The search keywords"}}
        IMPORTANT: Do NOT include specific dates (like "16 January") in the query unless the user asks for history.
-       Example: Use "Latest AI news India" instead of "AI news India 16 January".
        
     2. If user wants to SCHEDULE meeting, output JSON:
        {{"action": "schedule", "summary": "Meeting Name", "time": "YYYY-MM-DDTHH:MM:SS"}}
@@ -254,12 +255,12 @@ if user_input:
             clean_json = reply.replace("```json", "").replace("```", "").strip()
             data = json.loads(clean_json)
             
-            # --- ACTION: SEARCH (The New Power) ---
+            # --- ACTION: SEARCH (GOOGLE) ---
             if data["action"] == "search":
                 with st.chat_message("assistant"):
-                    with st.status(f"🔎 Searching: {data['query']}...", expanded=True) as status:
-                        # 1. Run the Search
-                        search_result = web_search(data["query"])
+                    with st.status(f"🔎 Google Search: {data['query']}...", expanded=True) as status:
+                        # 1. Run the Google Search
+                        search_result = google_search(data["query"])
                         status.write("Reading results...")
                         
                         # 2. Feed results back to Gemini (Round 2)
@@ -269,7 +270,6 @@ if user_input:
                         SEARCH TOOL RESULT: {search_result}
                         
                         INSTRUCTION: Answer the user's question using the SEARCH RESULT above.
-                        Keep it concise and relevant to the Indian context if applicable.
                         """
                         final_response = ask_gemini(research_prompt)
                         status.update(label="✅ Found it!", state="complete", expanded=False)
@@ -289,7 +289,7 @@ if user_input:
     # 5. Output Final Answer
     with st.chat_message("assistant"):
         st.write(final_response)
-        if "⚠️" not in final_response:
+        if "⚠️" not in final_response and "System Error" not in final_response:
             audio_path = asyncio.run(speak(final_response.replace("*", "")))
             st.audio(audio_path, autoplay=True)
     
