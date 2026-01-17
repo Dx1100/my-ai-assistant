@@ -6,17 +6,15 @@ import edge_tts
 import asyncio
 import json
 import tempfile
-import time
-import PyPDF2
-from PIL import Image
 import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from PIL import Image
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="My AI Jarvis", layout="wide")
+st.set_page_config(page_title="Jarvis AI", page_icon="🤖", layout="wide")
 
-# 1. Setup Database (Firebase - Long Term Memory)
+# 1. Setup Database
 if "FIREBASE_KEY" in st.secrets:
     key_info = st.secrets["FIREBASE_KEY"]
     if isinstance(key_info, str):
@@ -24,17 +22,14 @@ if "FIREBASE_KEY" in st.secrets:
         except: st.stop()
     else: key_dict = dict(key_info)
     
-    try: 
-        app = firebase_admin.get_app()
+    try: app = firebase_admin.get_app()
     except ValueError: 
         cred = credentials.Certificate(key_dict)
         app = firebase_admin.initialize_app(cred)
-    
     db = firestore.client()
-else: 
-    db = None
+else: db = None
 
-# 2. Setup Google Calendar
+# 2. Setup Calendar
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 cal_service = None
 CALENDAR_EMAIL = 'mybusiness110010@gmail.com' 
@@ -42,98 +37,59 @@ CALENDAR_EMAIL = 'mybusiness110010@gmail.com'
 if "GOOGLE_CALENDAR_KEY" in st.secrets:
     try:
         cal_info = st.secrets["GOOGLE_CALENDAR_KEY"]
-        if isinstance(cal_info, str):
-            cal_creds_dict = json.loads(cal_info)
-        else:
-            cal_creds_dict = dict(cal_info)
-            
-        creds = service_account.Credentials.from_service_account_info(
-            cal_creds_dict, scopes=SCOPES
-        )
+        if isinstance(cal_info, str): cal_creds_dict = json.loads(cal_info)
+        else: cal_creds_dict = dict(cal_info)
+        creds = service_account.Credentials.from_service_account_info(cal_creds_dict, scopes=SCOPES)
         cal_service = build('calendar', 'v3', credentials=creds)
-    except Exception as e:
-        st.error(f"Calendar Error: {e}")
+    except: pass
 
-# 3. Setup Brain (Gemini)
+# 3. Setup Brain
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
-# USE THE SMART MODEL (Gemini 2.0 Flash)
 model_name = 'models/gemini-2.0-flash'
 model = genai.GenerativeModel(model_name)
 
-# --- FUNCTIONS ---
+# --- CORE FUNCTIONS ---
 
 def google_search(query):
-    """Official Google Custom Search API"""
-    if "GOOGLE_SEARCH_KEY" not in st.secrets or "GOOGLE_SEARCH_CX" not in st.secrets:
-        return "Error: Google Search Keys missing in Secrets."
-    
+    if "GOOGLE_SEARCH_KEY" not in st.secrets: return "Error: No Search Keys"
     try:
         service = build("customsearch", "v1", developerKey=st.secrets["GOOGLE_SEARCH_KEY"])
         result = service.cse().list(q=query, cx=st.secrets["GOOGLE_SEARCH_CX"], num=4).execute()
         items = result.get('items', [])
-        if not items: return "No results found on Google."
-            
-        search_data = ""
-        for item in items:
-            title = item.get('title', 'No Title')
-            snippet = item.get('snippet', 'No Snippet')
-            link = item.get('link', 'No Link')
-            search_data += f"Title: {title}\nSnippet: {snippet}\nLink: {link}\n\n"
-        return search_data
-    except Exception as e:
-        return f"Google Search Error: {e}"
+        if not items: return "No results."
+        return "\n".join([f"Title: {i['title']}\nSnippet: {i['snippet']}\n" for i in items])
+    except Exception as e: return f"Search Error: {e}"
 
 def get_calendar_events():
-    if not cal_service: return "Calendar not connected."
+    if not cal_service: return "Calendar disconnected."
     try:
         now = datetime.datetime.utcnow().isoformat() + 'Z'
-        events_result = cal_service.events().list(
-            calendarId=CALENDAR_EMAIL, timeMin=now,
-            maxResults=5, singleEvents=True,
-            orderBy='startTime').execute()
-        events = events_result.get('items', [])
-        if not events: return "No upcoming events found."
-        
-        event_list = []
-        for event in events:
-            start = event['start'].get('dateTime', event['start'].get('date'))
-            event_list.append(f"📅 {start}: {event['summary']}")
-        return "\n".join(event_list)
-    except Exception as e:
-        return f"Error reading calendar: {e}"
+        events = cal_service.events().list(calendarId=CALENDAR_EMAIL, timeMin=now, maxResults=5, singleEvents=True, orderBy='startTime').execute().get('items', [])
+        if not events: return "No events."
+        return "\n".join([f"📅 {e['start'].get('dateTime', e['start'].get('date'))}: {e['summary']}" for e in events])
+    except: return "Calendar Error"
 
 def add_calendar_event(summary, start_time_str):
-    if not cal_service: return "Calendar not connected."
+    if not cal_service: return "Calendar disconnected."
     try:
         start_dt = datetime.datetime.fromisoformat(start_time_str)
         end_dt = start_dt + datetime.timedelta(hours=1)
-        event = {
-            'summary': summary,
-            'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'Asia/Kolkata'},
-            'end': {'dateTime': end_dt.isoformat(), 'timeZone': 'Asia/Kolkata'},
-        }
+        event = {'summary': summary, 'start': {'dateTime': start_dt.isoformat()}, 'end': {'dateTime': end_dt.isoformat()}}
         cal_service.events().insert(calendarId=CALENDAR_EMAIL, body=event).execute()
-        return f"✅ Scheduled '{summary}' for {start_time_str}"
-    except Exception as e:
-        return f"Failed to schedule: {e}"
+        return f"✅ Scheduled: {summary}"
+    except: return "Scheduling Failed"
 
-# --- MEMORY FUNCTIONS (THE SECOND BRAIN) ---
 def get_memories():
     if not db: return []
     try:
-        # Fetch all memories (In a pro app, we would search these, but for now we fetch all)
-        docs = db.collection('memories').order_by('timestamp', direction=firestore.Query.DESCENDING).limit(10).stream()
+        docs = db.collection('memories').order_by('timestamp', direction=firestore.Query.DESCENDING).limit(5).stream()
         return [doc.to_dict().get('text') for doc in docs]
     except: return []
 
 def add_memory(text):
-    if db: 
-        db.collection('memories').add({
-            'text': text, 
-            'timestamp': firestore.SERVER_TIMESTAMP
-        })
+    if db: db.collection('memories').add({'text': text, 'timestamp': firestore.SERVER_TIMESTAMP})
 
 async def speak(text):
     communicate = edge_tts.Communicate(text, "en-IN-NeerjaNeural")
@@ -141,134 +97,93 @@ async def speak(text):
         await communicate.save(fp.name)
         return fp.name
 
-def ask_gemini(prompt):
+def transcribe_audio(audio_file):
+    # Use Gemini to listen to the audio file and transcribe it
     try:
-        response = model.generate_content(prompt)
+        audio_file.seek(0)
+        audio_bytes = audio_file.read()
+        prompt = "Listen to this audio exactly and transcribe it word for word. Do not add any commentary."
+        response = model.generate_content([prompt, {"mime_type": "audio/wav", "data": audio_bytes}])
         return response.text
     except Exception as e:
-        return f"System Error: {str(e)}"
+        return f"Error listening: {e}"
 
-def process_file(uploaded):
+def ask_gemini(prompt_parts):
     try:
-        if uploaded.type in ["image/png", "image/jpeg", "image/jpg"]:
-            return Image.open(uploaded)
-        elif uploaded.type == "application/pdf":
-            reader = PyPDF2.PdfReader(uploaded)
-            return "".join([p.extract_text() for p in reader.pages])
-        else:
-            return uploaded.getvalue().decode("utf-8")
-    except Exception as e:
-        return f"Error reading file: {str(e)}"
+        response = model.generate_content(prompt_parts)
+        return response.text
+    except Exception as e: return f"Error: {e}"
 
-# --- UI ---
-st.title("🤖 My AI Jarvis (Second Brain)")
+# --- UI LAYOUT ---
+st.title("🤖 Jarvis Mobile")
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.header("Upload Context")
-    uploaded_file = st.file_uploader("File", type=["pdf", "png", "jpg", "txt"])
-    st.divider()
+# Voice Input (The New Power)
+audio_value = st.audio_input("🎙️ Tap to Speak")
 
-    st.header("🧠 Long-Term Memory")
-    if db:
-        with st.expander("View Recent Memories"):
-            mems = get_memories()
-            for m in mems:
-                st.info(f"📝 {m}")
-    else:
-        st.error("Database Disconnected")
-
-# --- CHAT LOGIC ---
 if "messages" not in st.session_state: st.session_state.messages = []
 
-# 1. Display History
+# Display Chat
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]): st.write(msg["content"])
 
-# 2. Handle New Input
-user_input = st.chat_input("Type instruction...")
+# Handle Inputs (Voice OR Text)
+user_text = st.chat_input("Type instruction...")
+final_input = None
 
-if user_input:
-    # A. Display User Message
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    with st.chat_message("user"): st.write(user_input)
+if audio_value:
+    with st.spinner("Listening..."):
+        transcribed_text = transcribe_audio(audio_value)
+        final_input = transcribed_text
+elif user_text:
+    final_input = user_text
 
-    # B. Gather Context
-    memories = get_memories() # Gets last 10 permanent memories
+# PROCESSING LOGIC
+if final_input:
+    st.session_state.messages.append({"role": "user", "content": final_input})
+    with st.chat_message("user"): st.write(final_input)
+
+    # Context Building
+    memories = get_memories()
     calendar_data = get_calendar_events()
-    
-    # C. Build Conversation History (INCREASED TO 15)
-    history_str = ""
-    # We take the last 15 messages so it remembers the immediate conversation flow
-    for msg in st.session_state.messages[-15:]: 
-        history_str += f"{msg['role'].upper()}: {msg['content']}\n"
-    
-    india_time = datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
+    history = st.session_state.messages[-10:]
     
     sys_prompt = f"""
-    SYSTEM: You are Jarvis, a personal AI assistant and Second Brain.
+    SYSTEM: You are Jarvis. concise, efficient, helpful.
+    MEMORIES: {memories}
+    CALENDAR: {calendar_data}
+    DATE: {datetime.datetime.now().strftime("%d %B %Y")}
+    HISTORY: {history}
     
-    --- YOUR SECOND BRAIN (PERMANENT KNOWLEDGE) ---
-    The user has explicitly saved these facts. Use them to answer questions:
-    {memories}
-    
-    --- CALENDAR ---
-    {calendar_data}
-    
-    --- CURRENT CONTEXT (SHORT TERM MEMORY) ---
-    {history_str}
-    
-    TODAY'S DATE: {india_time.strftime("%d %B %Y")}
-    
-    INSTRUCTIONS:
-    1. If user asks for REAL-TIME info, output JSON: {{"action": "search", "query": "..."}}
-    2. If user wants to SCHEDULE meeting, output JSON: {{"action": "schedule", "summary": "...", "time": "..."}}
-    3. If user says "Save this" or "Remember that", output JSON: {{"action": "save_memory", "text": "The exact info to save"}}
-    4. Otherwise, answer helpfully using the HISTORY and SECOND BRAIN.
+    TOOLS:
+    - Real-time info -> output JSON: {{"action": "search", "query": "..."}}
+    - Schedule -> output JSON: {{"action": "schedule", "summary": "...", "time": "..."}}
+    - Save Memory -> output JSON: {{"action": "save_memory", "text": "..."}}
     """
     
-    # D. First Attempt
-    reply = ask_gemini(sys_prompt)
+    reply = ask_gemini(sys_prompt + f"\nUSER: {final_input}")
     
-    # E. Action Handler
-    final_response = reply
-    
+    # Action Handling
     if "{" in reply and "action" in reply:
         try:
-            clean_json = reply.replace("```json", "").replace("```", "").strip()
-            data = json.loads(clean_json)
-            
+            data = json.loads(reply.replace("```json", "").replace("```", "").strip())
             if data["action"] == "search":
-                with st.chat_message("assistant"):
-                    with st.status(f"🔎 Google Search: {data['query']}...", expanded=True) as status:
-                        search_result = google_search(data["query"])
-                        status.write("Reading results...")
-                        
-                        research_prompt = f"""
-                        {sys_prompt}
-                        SEARCH TOOL RESULT: {search_result}
-                        INSTRUCTION: Answer based on the SEARCH RESULT.
-                        """
-                        final_response = ask_gemini(research_prompt)
-                        status.update(label="✅ Found it!", state="complete", expanded=False)
-
+                with st.status("🔎 Searching Google...", expanded=True):
+                    res = google_search(data["query"])
+                    reply = ask_gemini(f"{sys_prompt}\nSEARCH RESULT: {res}\nUSER ASKED: {final_input}")
             elif data["action"] == "schedule":
-                final_response = add_calendar_event(data["summary"], data["time"])
-            
+                reply = add_calendar_event(data["summary"], data["time"])
             elif data["action"] == "save_memory":
                 add_memory(data["text"])
-                final_response = f"🧠 I have saved this to your Second Brain: '{data['text']}'"
-                
-        except Exception as e:
-            pass
+                reply = "🧠 Memory Saved."
+        except: pass
 
-    # F. Output
+    # Output
     with st.chat_message("assistant"):
-        st.write(final_response)
-        if len(final_response) > 20 and "Warning" not in final_response: 
-            try:
-                audio_path = asyncio.run(speak(final_response.replace("*", "")))
-                st.audio(audio_path, autoplay=True)
-            except: pass
+        st.write(reply)
+        if len(reply) < 300: # Speak if short enough
+             try:
+                audio = asyncio.run(speak(reply.replace("*", "")))
+                st.audio(audio, autoplay=True)
+             except: pass
     
-    st.session_state.messages.append({"role": "assistant", "content": final_response})
+    st.session_state.messages.append({"role": "assistant", "content": reply})
