@@ -59,7 +59,8 @@ if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # Use 'gemini-1.5-flash' (It is faster and cheaper on quota than Pro)
-model_name = 'gemini-1.5-flash' 
+# Try the "latest" alias which often fixes the 404 error
+model_name = 'gemini-1.5-flash-latest'
 model = genai.GenerativeModel(model_name)
 
 # --- FUNCTIONS ---
