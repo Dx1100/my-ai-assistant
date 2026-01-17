@@ -61,7 +61,8 @@ if "GEMINI_API_KEY" in st.secrets:
 # --- MODEL SELECTION (SAFE MODE) ---
 # We use 'gemini-pro' because it is the most widely available v1.0 model.
 # If this works, we can try upgrading to Flash later.
-model_name = 'gemini-pro' 
+# Using the powerful Gemini 2.0 Flash model from your list
+model_name = 'models/gemini-2.0-flash'
 model = genai.GenerativeModel(model_name)
 
 # --- FUNCTIONS ---
