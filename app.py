@@ -16,6 +16,17 @@ from googleapiclient.discovery import build
 # --- CONFIGURATION ---
 st.set_page_config(page_title="My AI Jarvis", layout="wide")
 
+# Add this right after st.set_page_config...
+if "GOOGLE_SEARCH_KEY" in st.secrets:
+    st.success("✅ Search Key Found!")
+else:
+    st.error("❌ Search Key Missing from Secrets")
+
+if "GOOGLE_SEARCH_CX" in st.secrets:
+    st.success("✅ Search ID Found!")
+else:
+    st.error("❌ Search ID Missing from Secrets")
+
 # 1. Setup Database (Firebase)
 if "FIREBASE_KEY" in st.secrets:
     key_info = st.secrets["FIREBASE_KEY"]
