@@ -58,12 +58,10 @@ if "GOOGLE_CALENDAR_KEY" in st.secrets:
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
-# Use 'gemini-1.5-flash' (It is faster and cheaper on quota than Pro)
-# Try the "latest" alias which often fixes the 404 error
-# The "Ol' Reliable" (Standard v1.0 model)
-# Use the specific latest Flash version (Fastest & Cheapest)
-# The stable version string for 1.5 Flash
-model_name = 'gemini-1.5-flash-001'
+# --- MODEL SELECTION (SAFE MODE) ---
+# We use 'gemini-pro' because it is the most widely available v1.0 model.
+# If this works, we can try upgrading to Flash later.
+model_name = 'gemini-pro' 
 model = genai.GenerativeModel(model_name)
 
 # --- FUNCTIONS ---
@@ -173,6 +171,18 @@ with st.sidebar:
     st.header("Upload File")
     uploaded_file = st.file_uploader("Context", type=["pdf", "png", "jpg", "txt"])
     st.divider()
+
+    st.header("🔧 Diagnostics")
+    if st.button("Check Available Models"):
+        try:
+            available_models = []
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    available_models.append(m.name)
+            st.success("Your Key can access these models:")
+            st.code("\n".join(available_models))
+        except Exception as e:
+            st.error(f"Error checking models: {e}")
 
     st.header("📅 Calendar")
     if st.button("Refresh Events"):
