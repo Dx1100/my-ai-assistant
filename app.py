@@ -123,7 +123,7 @@ def add_calendar_event(summary, start_time_str):
 def get_memories():
     if not db: return []
     try:
-        # Fetch all memories (In a pro app, we would search these, but for now we fetch all)
+        # Fetch all memories
         docs = db.collection('memories').order_by('timestamp', direction=firestore.Query.DESCENDING).limit(10).stream()
         return [doc.to_dict().get('text') for doc in docs]
     except: return []
@@ -141,7 +141,7 @@ async def speak(text):
         await communicate.save(fp.name)
         return fp.name
 
-# --- NEW: VOICE FUNCTION ---
+# --- VOICE FUNCTION ---
 def transcribe_audio(audio_file):
     try:
         audio_file.seek(0)
@@ -174,12 +174,23 @@ def process_file(uploaded):
 # --- UI ---
 st.title("🤖 My AI Jarvis (Second Brain)")
 
-# --- SIDEBAR ---
+# --- SIDEBAR (RESTORED CALENDAR & MEMORY) ---
 with st.sidebar:
-    st.header("Upload Context")
+    st.header("📂 Upload Context")
     uploaded_file = st.file_uploader("File", type=["pdf", "png", "jpg", "txt"])
     st.divider()
 
+    # --- CALENDAR SECTION (ADDED BACK) ---
+    st.header("📅 Calendar")
+    if st.button("Refresh Events"):
+        st.rerun()
+    
+    events_text = get_calendar_events()
+    st.caption("Upcoming meetings:")
+    st.text(events_text) 
+    st.divider()
+
+    # --- MEMORY SECTION ---
     st.header("🧠 Long-Term Memory")
     if db:
         with st.expander("View Recent Memories"):
@@ -192,7 +203,7 @@ with st.sidebar:
 # --- CHAT LOGIC ---
 if "messages" not in st.session_state: st.session_state.messages = []
 
-# 1. Voice Input (Added to Top)
+# 1. Voice Input
 audio_value = st.audio_input("🎙️ Tap to Speak")
 
 # 2. Display History
@@ -218,11 +229,11 @@ if final_input:
     with st.chat_message("user"): st.write(final_input)
 
     # B. Gather Context
-    memories = get_memories() # Gets last 10 permanent memories
+    memories = get_memories()
     calendar_data = get_calendar_events()
     file_data = process_file(uploaded_file) if uploaded_file else None
     
-    # C. Build Conversation History (INCREASED TO 15)
+    # C. Build Conversation History
     history_str = ""
     for msg in st.session_state.messages[-15:]: 
         history_str += f"{msg['role'].upper()}: {msg['content']}\n"
@@ -251,7 +262,7 @@ if final_input:
     4. Otherwise, answer helpfully using the HISTORY and SECOND BRAIN.
     """
     
-    # Construct Full Prompt (Handle File Uploads if any)
+    # Construct Full Prompt
     prompt_payload = [sys_prompt]
     if file_data:
         if isinstance(file_data, Image.Image): prompt_payload.append(file_data)
