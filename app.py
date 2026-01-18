@@ -140,6 +140,10 @@ with st.sidebar:
 # --- CHAT LOGIC ---
 if "messages" not in st.session_state: st.session_state.messages = []
 
+# Initialize Audio State Tracker
+if "last_audio" not in st.session_state:
+    st.session_state.last_audio = None
+
 # 1. Voice Input (Top)
 audio_value = st.audio_input("🎙️ Voice Command")
 
@@ -150,11 +154,16 @@ for msg in st.session_state.messages:
 # 3. Text Input (Bottom)
 user_text = st.chat_input("Type instruction...")
 
-# 4. Input Priority Logic
+# 4. Input Priority Logic (THE SMART SWITCH FIX)
 final_input = None
-if audio_value:
+
+# Case A: New Audio Detected (Prioritize Voice)
+if audio_value and audio_value != st.session_state.last_audio:
+    st.session_state.last_audio = audio_value # Update tracker
     with st.spinner("Processing Voice..."):
         final_input = transcribe_audio(audio_value)
+
+# Case B: Text Input Detected (Prioritize Text if Audio hasn't changed)
 elif user_text:
     final_input = user_text
 
@@ -184,8 +193,6 @@ if final_input:
     """
     
     reply = ask_gemini([sys_prompt, f"USER: {final_input}"])
-    
-    # ... inside the "if final_input:" block ...
     
     # E. Action Handler (SMARTER VERSION)
     final_response = reply
