@@ -12,44 +12,56 @@ import imaplib
 import email
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.header import decode_header
+import re
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+import io
 from PIL import Image
 import PyPDF2
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Jarvis Pro", layout="wide", page_icon="📧")
+st.set_page_config(page_title="Jarvis Ultimate", layout="wide", page_icon="🛡️")
 
-# 1. Setup Database
+# 1. Setup Database & Google Services
 if "FIREBASE_KEY" in st.secrets:
     try:
         key_dict = json.loads(st.secrets["FIREBASE_KEY"]) if isinstance(st.secrets["FIREBASE_KEY"], str) else dict(st.secrets["FIREBASE_KEY"])
+        
+        # Firebase
         try: app = firebase_admin.get_app()
         except ValueError: 
             cred = credentials.Certificate(key_dict)
             app = firebase_admin.initialize_app(cred)
         db = firestore.client()
-    except: db = None
-else: db = None
+        
+        # Google Calendar & Drive
+        SCOPES = ['https://www.googleapis.com/auth/calendar', 'https://www.googleapis.com/auth/drive']
+        creds = service_account.Credentials.from_service_account_info(key_dict, scopes=SCOPES)
+        cal_service = build('calendar', 'v3', credentials=creds)
+        drive_service = build('drive', 'v3', credentials=creds)
+        
+    except Exception as e: 
+        db = None; cal_service = None; drive_service = None
+        st.error(f"Service Error: {e}")
+else:
+    db = None
 
-# 2. Setup Google Calendar
-SCOPES = ['https://www.googleapis.com/auth/calendar']
-cal_service = None
+# CALENDAR EMAIL (The calendar you want to edit)
 CALENDAR_EMAIL = 'mybusiness110010@gmail.com' 
 
-if "GOOGLE_CALENDAR_KEY" in st.secrets:
-    try:
-        cal_info = st.secrets["GOOGLE_CALENDAR_KEY"]
-        if isinstance(cal_info, str): cal_creds_dict = json.loads(cal_info)
-        else: cal_creds_dict = dict(cal_info)
-        creds = service_account.Credentials.from_service_account_info(cal_creds_dict, scopes=SCOPES)
-        cal_service = build('calendar', 'v3', credentials=creds)
-    except: pass
-
-# 3. Setup Brain
+# 2. Setup Brain
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 model = genai.GenerativeModel('models/gemini-2.0-flash')
+
+# --- UTILS ---
+def clean_html(raw_html):
+    """Remove HTML tags to let AI read clean text"""
+    cleanr = re.compile('<.*?>')
+    cleantext = re.sub(cleanr, '', raw_html)
+    return cleantext[:1000] # Limit to 1000 chars per email to save context
 
 # --- TOOLS ---
 
@@ -74,6 +86,7 @@ def search_youtube(query):
         return "\n".join([f"🎥 Video: {i['title']}\n🔗 Link: {i['link']}\n" for i in items])
     except Exception as e: return f"Video Search Failed: {e}"
 
+# --- ENHANCED EMAIL TOOLS ---
 def send_email(to_email, subject, body):
     if "GMAIL_USER" not in st.secrets: return "Error: Gmail secrets missing."
     try:
@@ -82,7 +95,6 @@ def send_email(to_email, subject, body):
         msg['To'] = to_email
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'plain'))
-        
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(st.secrets["GMAIL_USER"], st.secrets["GMAIL_PASSWORD"])
@@ -91,7 +103,8 @@ def send_email(to_email, subject, body):
         return f"✅ Email sent to {to_email}"
     except Exception as e: return f"Email Failed: {e}"
 
-def read_emails(limit=5):
+def read_emails_deep(limit=3):
+    """Reads Subject + Body + Links"""
     if "GMAIL_USER" not in st.secrets: return "Error: Gmail secrets missing."
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
@@ -108,16 +121,35 @@ def read_emails(limit=5):
             for response_part in msg_data:
                 if isinstance(response_part, tuple):
                     msg = email.message_from_bytes(response_part[1])
-                    subject = email.header.decode_header(msg["subject"])[0][0]
-                    if isinstance(subject, bytes): subject = subject.decode()
+                    
+                    # Decode Subject
+                    subject, encoding = decode_header(msg["subject"])[0]
+                    if isinstance(subject, bytes): 
+                        subject = subject.decode(encoding if encoding else "utf-8")
+                    
                     sender = msg["from"]
-                    result.append(f"📩 From: {sender}\nSubject: {subject}\n")
+                    
+                    # Extract Body
+                    body = ""
+                    if msg.is_multipart():
+                        for part in msg.walk():
+                            if part.get_content_type() == "text/plain":
+                                body = part.get_payload(decode=True).decode()
+                                break
+                            elif part.get_content_type() == "text/html":
+                                html_body = part.get_payload(decode=True).decode()
+                                body = clean_html(html_body) # Strip tags
+                    else:
+                        body = msg.get_payload(decode=True).decode()
+                    
+                    result.append(f"📩 FROM: {sender}\nSUBJECT: {subject}\nCONTENT: {body[:600]}...\n")
+        
         mail.close()
         mail.logout()
         return "\n".join(result)
     except Exception as e: return f"Read Email Error: {e}"
 
-# --- CORE FUNCTIONS ---
+# --- CALENDAR TOOLS (FIXED) ---
 def get_calendar_events():
     if not cal_service: return "Calendar disconnected."
     try:
@@ -127,6 +159,53 @@ def get_calendar_events():
         return "\n".join([f"📅 {e['start'].get('dateTime', e['start'].get('date'))}: {e['summary']}" for e in events])
     except: return "Calendar Error"
 
+def add_calendar_event(summary, start_time_str):
+    if not cal_service: return "Calendar disconnected."
+    try:
+        if "T" in start_time_str:
+             start_dt = datetime.datetime.fromisoformat(start_time_str)
+        else:
+             # Fallback logic for various time formats
+             start_dt = datetime.datetime.strptime(start_time_str, "%Y-%m-%d %H:%M:%S")
+             
+        end_dt = start_dt + datetime.timedelta(hours=1)
+        event = {
+            'summary': summary,
+            'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'Asia/Kolkata'},
+            'end': {'dateTime': end_dt.isoformat(), 'timeZone': 'Asia/Kolkata'},
+        }
+        cal_service.events().insert(calendarId=CALENDAR_EMAIL, body=event).execute()
+        return f"✅ Scheduled '{summary}' for {start_time_str}"
+    except Exception as e: return f"Scheduling Failed: {e}"
+
+# --- DRIVE TOOLS ---
+def save_to_drive(filename, content):
+    if not drive_service: return "Drive not connected."
+    try:
+        folder_id = None
+        results = drive_service.files().list(q="name='Jarvis_Memory' and mimeType='application/vnd.google-apps.folder'", fields="files(id, name)").execute()
+        items = results.get('files', [])
+        if items: folder_id = items[0]['id']
+        file_metadata = {'name': filename}; 
+        if folder_id: file_metadata['parents'] = [folder_id]
+        media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='text/plain')
+        file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        return f"✅ Saved '{filename}' to Drive."
+    except Exception as e: return f"Drive Save Error: {e}"
+
+def list_drive_files():
+    if not drive_service: return "Drive not connected."
+    try:
+        results = drive_service.files().list(q="name='Jarvis_Memory' and mimeType='application/vnd.google-apps.folder'", fields="files(id, name)").execute()
+        items = results.get('files', [])
+        if not items: return "Folder 'Jarvis_Memory' not found."
+        folder_id = items[0]['id']
+        files_res = drive_service.files().list(q=f"'{folder_id}' in parents", fields="files(id, name)").execute()
+        files = files_res.get('files', [])
+        return "\n".join([f"📄 {f['name']}" for f in files]) if files else "Empty Folder."
+    except Exception as e: return f"List Error: {e}"
+
+# --- MEMORY & AUDIO ---
 def get_memories():
     if not db: return []
     try:
@@ -157,35 +236,29 @@ def ask_gemini(prompt_parts):
     except Exception as e: return f"Error: {e}"
 
 # --- UI LAYOUT ---
-st.title("🤖 Jarvis Agent (Email Edition)")
+st.title("🛡️ Jarvis Ultimate Agent")
 
 with st.sidebar:
-    st.header("📧 Email Agent")
-    if st.button("Check Inbox"):
-        with st.spinner("Reading Gmail..."):
-            st.info(read_emails())
-    
+    st.header("📧 Communication")
+    if st.button("Deep Read Inbox"):
+        with st.spinner("Analyzing Emails..."): st.info(read_emails_deep())
     st.divider()
     st.header("📅 Calendar")
+    if st.button("Refresh Events"): st.rerun()
     st.text(get_calendar_events())
-    
     st.divider()
-    st.header("🧠 Memory")
-    if db:
-        with st.expander("View Memories"):
-            for m in get_memories(): st.info(m)
+    st.header("📂 Drive (Ready)")
+    if st.button("List Files"): st.info(list_drive_files())
 
 # --- CHAT LOGIC ---
 if "messages" not in st.session_state: st.session_state.messages = []
 if "last_audio" not in st.session_state: st.session_state.last_audio = None
 
-# Inputs
 audio_value = st.audio_input("🎙️ Voice Command")
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]): st.write(msg["content"])
 user_text = st.chat_input("Type instruction...")
 
-# Smart Switch Logic
 final_input = None
 if audio_value and audio_value != st.session_state.last_audio:
     st.session_state.last_audio = audio_value
@@ -201,28 +274,33 @@ if final_input:
     memories = get_memories()
     calendar_data = get_calendar_events()
     
-    # --- STRICT SYSTEM PROMPT ---
+    # --- PROMPT ---
     sys_prompt = f"""
-    SYSTEM: You are Jarvis, a Functional AI Agent with REAL-WORLD ACCESS.
+    SYSTEM: You are Jarvis, a Functional AI Agent.
     
-    YOUR CAPABILITIES:
-    - You CAN send emails.
-    - You CAN read emails.
-    - You CAN search Google and YouTube.
+    CAPABILITIES:
+    - SCHEDULE MEETINGS (Use 'schedule' tool).
+    - READ EMAIL DEEP (Use 'read_email' tool).
+    - SEND EMAILS.
+    - SAVE TO DRIVE.
     
     MEMORIES: {memories}
     CALENDAR: {calendar_data}
-    DATE: {datetime.datetime.now().strftime("%d %B %Y")}
+    DATE: {datetime.datetime.now().strftime("%Y-%m-%d")}
     
     INSTRUCTIONS:
-    - Do NOT refuse to send emails. The user has authenticated you.
-    - If the user asks to email, output the JSON command immediately.
+    1. If user asks to read email, use 'read_email'. I will give you the full content. 
+       THEN you must summarize it and extract links for the user.
+    2. If user asks to schedule, use 'schedule'.
     
     TOOLS (OUTPUT JSON ONLY):
     - Search -> {{"action": "search", "query": "..."}}
     - Videos -> {{"action": "search_video", "query": "..."}}
-    - Email -> {{"action": "send_email", "to": "email@address.com", "subject": "Short Subject", "body": "Full body content"}}
-    - Memory -> {{"action": "save_memory", "text": "..."}}
+    - Email -> {{"action": "send_email", "to": "...", "subject": "...", "body": "..."}}
+    - Read Email -> {{"action": "read_email"}}
+    - Schedule -> {{"action": "schedule", "summary": "Meeting Name", "time": "2025-01-20T10:00:00"}}
+    - Save to Drive -> {{"action": "save_drive", "filename": "...", "content": "..."}}
+    - Save Memory -> {{"action": "save_memory", "text": "..."}}
     """
     
     reply = ask_gemini([sys_prompt, f"USER: {final_input}"])
@@ -252,6 +330,34 @@ if final_input:
                 with st.status(f"📧 Sending to {data['to']}...", expanded=True) as status:
                     final_response = send_email(data["to"], data["subject"], data["body"])
                     status.update(label="✅ Sent!", state="complete", expanded=False)
+
+            elif data["action"] == "read_email":
+                with st.status("📧 Analyzing Inbox...", expanded=True) as status:
+                    raw_emails = read_emails_deep()
+                    status.write("Summarizing...")
+                    # FEED RAW EMAILS BACK TO BRAIN FOR SUMMARY
+                    analysis_prompt = f"""
+                    {sys_prompt}
+                    RAW EMAIL DATA:
+                    {raw_emails}
+                    
+                    USER INSTRUCTION: Summarize these emails. 
+                    - Tell me what is useful.
+                    - List any Important Links found.
+                    - Ignore spam.
+                    """
+                    final_response = ask_gemini(analysis_prompt)
+                    status.update(label="✅ Analysis Complete", state="complete", expanded=False)
+
+            elif data["action"] == "schedule":
+                with st.status(f"📅 Scheduling {data['summary']}...", expanded=True) as status:
+                    final_response = add_calendar_event(data["summary"], data["time"])
+                    status.update(label="✅ Scheduled!", state="complete", expanded=False)
+
+            elif data["action"] == "save_drive":
+                with st.status(f"💾 Saving {data['filename']}...", expanded=True) as status:
+                    final_response = save_to_drive(data["filename"], data["content"])
+                    status.update(label="✅ Saved!", state="complete", expanded=False)
 
             elif data["action"] == "save_memory":
                 add_memory(data["text"])
