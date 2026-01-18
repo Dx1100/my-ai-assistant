@@ -185,18 +185,39 @@ if final_input:
     
     reply = ask_gemini([sys_prompt, f"USER: {final_input}"])
     
-    # Action Handling
+    # ... inside the "if final_input:" block ...
+    
+    # E. Action Handler (SMARTER VERSION)
     final_response = reply
+    
+    # Check if there is a JSON command hidden in the text
     if "{" in reply and "action" in reply:
         try:
-            data = json.loads(reply.replace("```json", "").replace("```", "").strip())
+            # 1. Find the start and end of the JSON object strictly
+            start_index = reply.find("{")
+            end_index = reply.rfind("}") + 1
+            clean_json = reply[start_index:end_index]
+            
+            # 2. Load it
+            data = json.loads(clean_json)
             
             if data["action"] == "search":
                 with st.status(f"🔎 Researching: {data['query']}...", expanded=True) as status:
                     res = google_search(data["query"])
                     status.write("Found sources...")
-                    # Feed results back to Brain
-                    research_prompt = f"{sys_prompt}\nSEARCH DATA:\n{res}\nUSER REQUEST: {final_input}\nINSTRUCTION: Summarize and CITE sources."
+                    
+                    # Feed results back to Brain with CITATION instruction
+                    research_prompt = f"""
+                    {sys_prompt}
+                    SEARCH DATA FOUND:
+                    {res}
+                    
+                    USER ORIGINAL REQUEST: {final_input}
+                    
+                    INSTRUCTION: 
+                    1. Answer the user's question using the SEARCH DATA.
+                    2. You MUST cite the source name and link for every fact.
+                    """
                     final_response = ask_gemini(research_prompt)
                     status.update(label="✅ Done!", state="complete", expanded=False)
 
@@ -209,11 +230,12 @@ if final_input:
 
             elif data["action"] == "save_memory":
                 add_memory(data["text"])
-                final_response = "🧠 Memory Saved."
+                final_response = f"🧠 Memory Saved: {data['text']}"
                 
         except Exception as e:
-            final_response = f"Action Error: {e}"
-
+            # If it fails, just print the raw reply so we see what happened
+            final_response = f"I tried to run a tool but failed. Raw Error: {e}"
+            
     # Output
     with st.chat_message("assistant"):
         st.write(final_response)
