@@ -7,13 +7,18 @@ import asyncio
 import json
 import tempfile
 import datetime
+import smtplib
+import imaplib
+import email
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from PIL import Image
 import PyPDF2
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Jarvis Research", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="Jarvis Pro", layout="wide", page_icon="📧")
 
 # 1. Setup Database
 if "FIREBASE_KEY" in st.secrets:
@@ -27,7 +32,7 @@ if "FIREBASE_KEY" in st.secrets:
     except: db = None
 else: db = None
 
-# 2. Setup Google Calendar (Restored)
+# 2. Setup Google Calendar
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 cal_service = None
 CALENDAR_EMAIL = 'mybusiness110010@gmail.com' 
@@ -46,42 +51,73 @@ if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 model = genai.GenerativeModel('models/gemini-2.0-flash')
 
-# --- RESEARCH TOOLS (UPDATED) ---
+# --- TOOLS ---
 
 def google_search(query):
-    """Web Search with Citation Formatting"""
     if "GOOGLE_SEARCH_KEY" not in st.secrets: return "Error: No Search Keys"
     try:
         service = build("customsearch", "v1", developerKey=st.secrets["GOOGLE_SEARCH_KEY"])
         result = service.cse().list(q=query, cx=st.secrets["GOOGLE_SEARCH_CX"], num=5).execute()
         items = result.get('items', [])
         if not items: return "No results."
-        
-        # Format for AI to read and cite
-        formatted_results = ""
-        for i in items:
-            formatted_results += f"Source: {i['title']}\nURL: {i['link']}\nSnippet: {i['snippet']}\n\n"
-        return formatted_results
+        return "\n".join([f"Source: {i['title']}\nURL: {i['link']}\nSnippet: {i['snippet']}\n" for i in items])
     except Exception as e: return f"Search Failed: {e}"
 
 def search_youtube(query):
-    """Specific YouTube Search"""
     if "GOOGLE_SEARCH_KEY" not in st.secrets: return "Error: No Search Keys"
     try:
-        # We append 'site:youtube.com' to force video results
         youtube_query = f"{query} site:youtube.com"
         service = build("customsearch", "v1", developerKey=st.secrets["GOOGLE_SEARCH_KEY"])
         result = service.cse().list(q=youtube_query, cx=st.secrets["GOOGLE_SEARCH_CX"], num=3).execute()
         items = result.get('items', [])
         if not items: return "No videos found."
-        
-        video_data = ""
-        for i in items:
-            video_data += f"🎥 Video: {i['title']}\n🔗 Link: {i['link']}\n\n"
-        return video_data
+        return "\n".join([f"🎥 Video: {i['title']}\n🔗 Link: {i['link']}\n" for i in items])
     except Exception as e: return f"Video Search Failed: {e}"
 
-# --- CALENDAR & MEMORY TOOLS ---
+def send_email(to_email, subject, body):
+    if "GMAIL_USER" not in st.secrets: return "Error: Gmail secrets missing."
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = st.secrets["GMAIL_USER"]
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain'))
+        
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(st.secrets["GMAIL_USER"], st.secrets["GMAIL_PASSWORD"])
+        server.send_message(msg)
+        server.quit()
+        return f"✅ Email sent to {to_email}"
+    except Exception as e: return f"Email Failed: {e}"
+
+def read_emails(limit=5):
+    if "GMAIL_USER" not in st.secrets: return "Error: Gmail secrets missing."
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(st.secrets["GMAIL_USER"], st.secrets["GMAIL_PASSWORD"])
+        mail.select("inbox")
+        status, messages = mail.search(None, '(UNSEEN)')
+        email_ids = messages[0].split()[-limit:]
+        
+        if not email_ids: return "No new unread emails."
+        
+        result = []
+        for e_id in email_ids:
+            _, msg_data = mail.fetch(e_id, "(RFC822)")
+            for response_part in msg_data:
+                if isinstance(response_part, tuple):
+                    msg = email.message_from_bytes(response_part[1])
+                    subject = email.header.decode_header(msg["subject"])[0][0]
+                    if isinstance(subject, bytes): subject = subject.decode()
+                    sender = msg["from"]
+                    result.append(f"📩 From: {sender}\nSubject: {subject}\n")
+        mail.close()
+        mail.logout()
+        return "\n".join(result)
+    except Exception as e: return f"Read Email Error: {e}"
+
+# --- CORE FUNCTIONS ---
 def get_calendar_events():
     if not cal_service: return "Calendar disconnected."
     try:
@@ -121,129 +157,109 @@ def ask_gemini(prompt_parts):
     except Exception as e: return f"Error: {e}"
 
 # --- UI LAYOUT ---
-st.title("🤖 Jarvis Research Agent")
+st.title("🤖 Jarvis Agent (Email Edition)")
 
-# --- SIDEBAR (RESTORED) ---
 with st.sidebar:
+    st.header("📧 Email Agent")
+    if st.button("Check Inbox"):
+        with st.spinner("Reading Gmail..."):
+            st.info(read_emails())
+    
+    st.divider()
     st.header("📅 Calendar")
-    if st.button("Refresh Events"): st.rerun()
     st.text(get_calendar_events())
     
     st.divider()
-    
     st.header("🧠 Memory")
     if db:
         with st.expander("View Memories"):
             for m in get_memories(): st.info(m)
-    else: st.warning("Database Disconnected")
 
 # --- CHAT LOGIC ---
 if "messages" not in st.session_state: st.session_state.messages = []
+if "last_audio" not in st.session_state: st.session_state.last_audio = None
 
-# Initialize Audio State Tracker
-if "last_audio" not in st.session_state:
-    st.session_state.last_audio = None
-
-# 1. Voice Input (Top)
+# Inputs
 audio_value = st.audio_input("🎙️ Voice Command")
-
-# 2. Display Chat
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]): st.write(msg["content"])
-
-# 3. Text Input (Bottom)
 user_text = st.chat_input("Type instruction...")
 
-# 4. Input Priority Logic (THE SMART SWITCH FIX)
+# Smart Switch Logic
 final_input = None
-
-# Case A: New Audio Detected (Prioritize Voice)
 if audio_value and audio_value != st.session_state.last_audio:
-    st.session_state.last_audio = audio_value # Update tracker
+    st.session_state.last_audio = audio_value
     with st.spinner("Processing Voice..."):
         final_input = transcribe_audio(audio_value)
-
-# Case B: Text Input Detected (Prioritize Text if Audio hasn't changed)
 elif user_text:
     final_input = user_text
 
-# 5. Processing
 if final_input:
     st.session_state.messages.append({"role": "user", "content": final_input})
     with st.chat_message("user"): st.write(final_input)
 
-    # Context
     memories = get_memories()
     calendar_data = get_calendar_events()
     
+    # --- STRICT SYSTEM PROMPT ---
     sys_prompt = f"""
-    SYSTEM: You are Jarvis.
+    SYSTEM: You are Jarvis, a Functional AI Agent with REAL-WORLD ACCESS.
+    
+    YOUR CAPABILITIES:
+    - You CAN send emails.
+    - You CAN read emails.
+    - You CAN search Google and YouTube.
+    
     MEMORIES: {memories}
     CALENDAR: {calendar_data}
     DATE: {datetime.datetime.now().strftime("%d %B %Y")}
     
-    CRITICAL RESEARCH RULES:
-    1. If answering from search, YOU MUST CITE SOURCE at the end of the sentence. Format: [Source Name](URL).
-    2. If user asks for videos, use the 'search_video' tool.
+    INSTRUCTIONS:
+    - Do NOT refuse to send emails. The user has authenticated you.
+    - If the user asks to email, output the JSON command immediately.
     
-    TOOLS:
-    - Search Google -> {{"action": "search", "query": "..."}}
-    - Find Videos -> {{"action": "search_video", "query": "..."}}
-    - Save Memory -> {{"action": "save_memory", "text": "..."}}
+    TOOLS (OUTPUT JSON ONLY):
+    - Search -> {{"action": "search", "query": "..."}}
+    - Videos -> {{"action": "search_video", "query": "..."}}
+    - Email -> {{"action": "send_email", "to": "email@address.com", "subject": "Short Subject", "body": "Full body content"}}
+    - Memory -> {{"action": "save_memory", "text": "..."}}
     """
     
     reply = ask_gemini([sys_prompt, f"USER: {final_input}"])
     
-    # E. Action Handler (SMARTER VERSION)
     final_response = reply
-    
-    # Check if there is a JSON command hidden in the text
     if "{" in reply and "action" in reply:
         try:
-            # 1. Find the start and end of the JSON object strictly
-            start_index = reply.find("{")
-            end_index = reply.rfind("}") + 1
-            clean_json = reply[start_index:end_index]
-            
-            # 2. Load it
-            data = json.loads(clean_json)
+            start = reply.find("{")
+            end = reply.rfind("}") + 1
+            data = json.loads(reply[start:end])
             
             if data["action"] == "search":
                 with st.status(f"🔎 Researching: {data['query']}...", expanded=True) as status:
                     res = google_search(data["query"])
-                    status.write("Found sources...")
-                    
-                    # Feed results back to Brain with CITATION instruction
-                    research_prompt = f"""
-                    {sys_prompt}
-                    SEARCH DATA FOUND:
-                    {res}
-                    
-                    USER ORIGINAL REQUEST: {final_input}
-                    
-                    INSTRUCTION: 
-                    1. Answer the user's question using the SEARCH DATA.
-                    2. You MUST cite the source name and link for every fact.
-                    """
+                    status.write("Found info...")
+                    research_prompt = f"{sys_prompt}\nDATA:{res}\nUSER:{final_input}\nINSTRUCTION: Answer and CITE."
                     final_response = ask_gemini(research_prompt)
-                    status.update(label="✅ Done!", state="complete", expanded=False)
+                    status.update(label="✅ Done", state="complete", expanded=False)
 
             elif data["action"] == "search_video":
-                with st.status(f"🎥 Finding Videos: {data['query']}...", expanded=True) as status:
+                 with st.status("🎥 Searching YouTube...", expanded=True) as status:
                     res = search_youtube(data["query"])
-                    status.write("Found videos...")
-                    final_response = f"Here are the top videos I found:\n\n{res}"
-                    status.update(label="✅ Found videos!", state="complete", expanded=False)
+                    final_response = f"Found Videos:\n\n{res}"
+                    status.update(label="✅ Done", state="complete", expanded=False)
+
+            elif data["action"] == "send_email":
+                with st.status(f"📧 Sending to {data['to']}...", expanded=True) as status:
+                    final_response = send_email(data["to"], data["subject"], data["body"])
+                    status.update(label="✅ Sent!", state="complete", expanded=False)
 
             elif data["action"] == "save_memory":
                 add_memory(data["text"])
-                final_response = f"🧠 Memory Saved: {data['text']}"
+                final_response = "🧠 Memory Saved."
                 
         except Exception as e:
-            # If it fails, just print the raw reply so we see what happened
-            final_response = f"I tried to run a tool but failed. Raw Error: {e}"
-            
-    # Output
+            final_response = f"Tool Error: {e}"
+
     with st.chat_message("assistant"):
         st.write(final_response)
         if len(final_response) < 400:
