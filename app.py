@@ -22,28 +22,21 @@ import io
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Jarvis Pro", layout="wide", page_icon="🛡️")
 
-# --- 1. SETUP DATABASE (FIREBASE) ---
+# --- 1. SETUP DATABASE ---
 if "FIREBASE_KEY" in st.secrets:
     try:
         key_info = st.secrets["FIREBASE_KEY"]
-        if isinstance(key_info, str):
-            key_dict = json.loads(key_info)
-        else:
-            key_dict = dict(key_info)
-            
-        try:
-            app = firebase_admin.get_app()
-        except ValueError:
+        if isinstance(key_info, str): key_dict = json.loads(key_info)
+        else: key_dict = dict(key_info)
+        try: app = firebase_admin.get_app()
+        except ValueError: 
             cred = credentials.Certificate(key_dict)
             app = firebase_admin.initialize_app(cred)
         db = firestore.client()
-    except Exception as e:
-        db = None
-        st.error(f"Database Error: {e}")
-else:
-    db = None
+    except: db = None
+else: db = None
 
-# --- 2. SETUP CALENDAR (ORIGINAL KEY) ---
+# --- 2. SETUP CALENDAR ---
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 cal_service = None
 CALENDAR_EMAIL = 'mybusiness110010@gmail.com'
@@ -51,31 +44,23 @@ CALENDAR_EMAIL = 'mybusiness110010@gmail.com'
 if "GOOGLE_CALENDAR_KEY" in st.secrets:
     try:
         cal_info = st.secrets["GOOGLE_CALENDAR_KEY"]
-        if isinstance(cal_info, str):
-            cal_creds_dict = json.loads(cal_info)
-        else:
-            cal_creds_dict = dict(cal_info)
-        
+        if isinstance(cal_info, str): cal_creds_dict = json.loads(cal_info)
+        else: cal_creds_dict = dict(cal_info)
         cal_creds = service_account.Credentials.from_service_account_info(cal_creds_dict, scopes=SCOPES)
         cal_service = build('calendar', 'v3', credentials=cal_creds)
-    except Exception as e:
-        st.error(f"Calendar Key Error: {e}")
+    except: pass
 
-# --- 3. SETUP DRIVE (SEPARATE KEY CHECK) ---
+# --- 3. SETUP DRIVE ---
 drive_service = None
 if "FIREBASE_KEY" in st.secrets:
     try:
         key_info = st.secrets["FIREBASE_KEY"]
-        if isinstance(key_info, str):
-            key_dict = json.loads(key_info)
-        else:
-            key_dict = dict(key_info)
-            
+        if isinstance(key_info, str): key_dict = json.loads(key_info)
+        else: key_dict = dict(key_info)
         drive_scopes = ['https://www.googleapis.com/auth/drive']
         drive_creds = service_account.Credentials.from_service_account_info(key_dict, scopes=drive_scopes)
         drive_service = build('drive', 'v3', credentials=drive_creds)
-    except:
-        pass
+    except: pass
 
 # --- 4. SETUP BRAIN ---
 if "GEMINI_API_KEY" in st.secrets:
@@ -88,7 +73,6 @@ def clean_html(raw_html):
     return re.sub(cleanr, '', raw_html)[:1000]
 
 # --- TOOLS ---
-
 def google_search(query):
     if "GOOGLE_SEARCH_KEY" not in st.secrets: return "Error: No Search Keys"
     try:
@@ -146,14 +130,11 @@ def read_emails_deep(limit=3):
                     subject_header = msg["subject"]
                     if subject_header:
                         subject, encoding = decode_header(subject_header)[0]
-                        if isinstance(subject, bytes):
-                            subject = subject.decode(encoding if encoding else "utf-8")
-                    else:
-                        subject = "No Subject"
-                        
+                        if isinstance(subject, bytes): subject = subject.decode(encoding if encoding else "utf-8")
+                    else: subject = "No Subject"
+                    
                     sender = msg["from"]
                     body = "No Content"
-                    
                     if msg.is_multipart():
                         for part in msg.walk():
                             if part.get_content_type() == "text/plain":
@@ -163,9 +144,7 @@ def read_emails_deep(limit=3):
                                 body = clean_html(part.get_payload(decode=True).decode())
                     else:
                         body = msg.get_payload(decode=True).decode()
-                        
                     result.append(f"📩 FROM: {sender}\nSUBJECT: {subject}\nCONTENT: {body[:600]}...\n")
-        
         mail.close()
         mail.logout()
         return "\n".join(result)
@@ -178,22 +157,15 @@ def get_calendar_events():
         events = cal_service.events().list(calendarId=CALENDAR_EMAIL, timeMin=now, maxResults=5, singleEvents=True, orderBy='startTime').execute().get('items', [])
         if not events: return "No events."
         return "\n".join([f"📅 {e['start'].get('dateTime', e['start'].get('date'))}: {e['summary']}" for e in events])
-    except Exception as e: return f"Calendar Error: {e}"
+    except: return "Calendar Error"
 
 def add_calendar_event(summary, start_time_str):
     if not cal_service: return "Calendar disconnected."
     try:
-        if "T" in start_time_str:
-             start_dt = datetime.datetime.fromisoformat(start_time_str)
-        else:
-             start_dt = datetime.datetime.strptime(start_time_str, "%Y-%m-%d %H:%M:%S")
-             
+        if "T" in start_time_str: start_dt = datetime.datetime.fromisoformat(start_time_str)
+        else: start_dt = datetime.datetime.strptime(start_time_str, "%Y-%m-%d %H:%M:%S")
         end_dt = start_dt + datetime.timedelta(hours=1)
-        event = {
-            'summary': summary,
-            'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'Asia/Kolkata'},
-            'end': {'dateTime': end_dt.isoformat(), 'timeZone': 'Asia/Kolkata'},
-        }
+        event = {'summary': summary, 'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'Asia/Kolkata'}, 'end': {'dateTime': end_dt.isoformat(), 'timeZone': 'Asia/Kolkata'}}
         cal_service.events().insert(calendarId=CALENDAR_EMAIL, body=event).execute()
         return f"✅ Scheduled '{summary}' for {start_time_str}"
     except Exception as e: return f"Scheduling Failed: {e}"
@@ -205,10 +177,8 @@ def save_to_drive(filename, content):
         results = drive_service.files().list(q="name='Jarvis_Memory' and mimeType='application/vnd.google-apps.folder'", fields="files(id, name)").execute()
         items = results.get('files', [])
         if items: folder_id = items[0]['id']
-        
         file_metadata = {'name': filename}
         if folder_id: file_metadata['parents'] = [folder_id]
-        
         media = MediaIoBaseUpload(io.BytesIO(content.encode('utf-8')), mimetype='text/plain')
         file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
         return f"✅ Saved '{filename}' to Drive."
@@ -220,11 +190,9 @@ def list_drive_files():
         results = drive_service.files().list(q="name='Jarvis_Memory' and mimeType='application/vnd.google-apps.folder'", fields="files(id, name)").execute()
         items = results.get('files', [])
         if not items: return "Folder 'Jarvis_Memory' not found."
-        
         folder_id = items[0]['id']
         files_res = drive_service.files().list(q=f"'{folder_id}' in parents", fields="files(id, name)").execute()
         files = files_res.get('files', [])
-        
         return "\n".join([f"📄 {f['name']}" for f in files]) if files else "Empty Folder."
     except Exception as e: return f"List Error: {e}"
 
@@ -242,12 +210,10 @@ def add_memory(text):
 def transcribe_audio(audio_file):
     try:
         audio_file.seek(0)
-        audio_bytes = audio_file.read()
         prompt = "Transcribe exactly."
-        response = model.generate_content([prompt, {"mime_type": "audio/wav", "data": audio_bytes}])
+        response = model.generate_content([prompt, {"mime_type": "audio/wav", "data": audio_file.read()}])
         return response.text
-    except Exception as e:
-        return f"Error listening: {e}"
+    except: return "Error listening."
 
 async def speak(text):
     communicate = edge_tts.Communicate(text, "en-IN-NeerjaNeural")
@@ -256,8 +222,7 @@ async def speak(text):
         return fp.name
 
 def ask_gemini(prompt_parts):
-    try:
-        return model.generate_content(prompt_parts).text
+    try: return model.generate_content(prompt_parts).text
     except Exception as e: return f"Error: {e}"
 
 # --- UI LAYOUT ---
@@ -287,10 +252,8 @@ user_text = st.chat_input("Type instruction...")
 final_input = None
 if audio_value and audio_value != st.session_state.last_audio:
     st.session_state.last_audio = audio_value
-    with st.spinner("Processing Voice..."):
-        final_input = transcribe_audio(audio_value)
-elif user_text:
-    final_input = user_text
+    with st.spinner("Processing Voice..."): final_input = transcribe_audio(audio_value)
+elif user_text: final_input = user_text
 
 if final_input:
     st.session_state.messages.append({"role": "user", "content": final_input})
@@ -299,32 +262,22 @@ if final_input:
     memories = get_memories()
     calendar_data = get_calendar_events()
     
-    # --- PROMPT ---
     sys_prompt = f"""
     SYSTEM: You are Jarvis.
-    
-    CAPABILITIES:
-    - SCHEDULE MEETINGS (Use 'schedule' tool).
-    - READ EMAIL DEEP (Use 'read_email' tool).
-    - SEND EMAILS.
-    - SAVE TO DRIVE.
-    
+    CAPABILITIES: SCHEDULE (Use 'schedule'), READ EMAIL (Use 'read_email'), SEND EMAIL, SAVE DRIVE.
     MEMORIES: {memories}
     CALENDAR: {calendar_data}
     DATE: {datetime.datetime.now().strftime("%Y-%m-%d")}
-    
     INSTRUCTIONS:
-    1. If user asks to read email, use 'read_email'. I will give you the full content. 
-       THEN you must summarize it and extract links for the user.
-    2. If user asks to schedule, use 'schedule'.
-    
+    1. If user asks to read email, output {{"action": "read_email"}}.
+    2. If user asks to schedule, output {{"action": "schedule", ...}}.
     TOOLS (OUTPUT JSON ONLY):
     - Search -> {{"action": "search", "query": "..."}}
     - Videos -> {{"action": "search_video", "query": "..."}}
     - Email -> {{"action": "send_email", "to": "...", "subject": "...", "body": "..."}}
     - Read Email -> {{"action": "read_email"}}
-    - Schedule -> {{"action": "schedule", "summary": "Meeting Name", "time": "2025-01-20T10:00:00"}}
-    - Save to Drive -> {{"action": "save_drive", "filename": "...", "content": "..."}}
+    - Schedule -> {{"action": "schedule", "summary": "...", "time": "2025-01-20T10:00:00"}}
+    - Save Drive -> {{"action": "save_drive", "filename": "...", "content": "..."}}
     - Save Memory -> {{"action": "save_memory", "text": "..."}}
     """
     
@@ -341,8 +294,7 @@ if final_input:
                 with st.status(f"🔎 Researching: {data['query']}...", expanded=True) as status:
                     res = google_search(data["query"])
                     status.write("Found info...")
-                    research_prompt = f"{sys_prompt}\nDATA:{res}\nUSER:{final_input}\nINSTRUCTION: Answer and CITE."
-                    final_response = ask_gemini(research_prompt)
+                    final_response = ask_gemini(f"{sys_prompt}\nDATA:{res}\nUSER:{final_input}\nINSTRUCTION: Answer and CITE.")
                     status.update(label="✅ Done", state="complete", expanded=False)
 
             elif data["action"] == "search_video":
@@ -359,18 +311,19 @@ if final_input:
             elif data["action"] == "read_email":
                 with st.status("📧 Analyzing Inbox...", expanded=True) as status:
                     raw_emails = read_emails_deep()
-                    status.write("Summarizing...")
+                    status.write("Reading content...")
+                    
+                    # FORCE TEXT MODE: Tell Brain to NOT use tools here
                     analysis_prompt = f"""
-                    {sys_prompt}
-                    RAW EMAIL DATA:
+                    SYSTEM: You are a Helpful Assistant.
+                    TASK: Summarize these emails for the user.
+                    CONSTRAINT: DO NOT output JSON. DO NOT use tools. Just write a helpful text summary.
+                    
+                    EMAILS FOUND:
                     {raw_emails}
-                    USER INSTRUCTION: Summarize these emails. 
-                    - Tell me what is useful.
-                    - List any Important Links found.
-                    - Ignore spam.
                     """
                     final_response = ask_gemini(analysis_prompt)
-                    status.update(label="✅ Analysis Complete", state="complete", expanded=False)
+                    status.update(label="✅ Summary Ready", state="complete", expanded=False)
 
             elif data["action"] == "schedule":
                 with st.status(f"📅 Scheduling {data['summary']}...", expanded=True) as status:
