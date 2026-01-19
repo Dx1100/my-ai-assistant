@@ -8,6 +8,7 @@ import io
 import asyncio
 import edge_tts
 import json
+import time
 
 # --- CONFIG ---
 st.set_page_config(page_title="Jarvis 2.0", page_icon="⚡", layout="centered")
@@ -34,7 +35,7 @@ if "FIREBASE_KEY" in st.secrets:
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
-# Try to find the best available Flash model
+# Model Setup
 try:
     model = genai.GenerativeModel('models/gemini-2.0-flash')
 except:
@@ -79,12 +80,13 @@ def update_file(filename, new_content):
     except:
         return False
 
-# --- 3. SPEECH OUTPUT ---
+# --- 3. SPEECH OUTPUT (Fixing Freeze) ---
 async def text_to_speech(text):
+    # Use a unique filename every time to avoid file locking issues
+    filename = f"reply_{int(time.time())}.mp3"
     communicate = edge_tts.Communicate(text, "en-US-AriaNeural")
-    out_file = "reply.mp3"
-    await communicate.save(out_file)
-    return out_file
+    await communicate.save(filename)
+    return filename
 
 # --- 4. THE AGENT ---
 def run_agent(user_input, input_type="text"):
@@ -128,103 +130,106 @@ def run_agent(user_input, input_type="text"):
 # --- 5. UI LAYOUT ---
 st.title("⚡ Jarvis 2.0")
 
-# --- INITIALIZE SESSION STATE ---
+# --- SESSION STATE ---
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-if "last_audio" not in st.session_state:
-    st.session_state.last_audio = None
+if "last_processed_audio" not in st.session_state:
+    st.session_state.last_processed_audio = None
 
 # --- DISPLAY HISTORY ---
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
+        # If this message has audio associated with it, show the player
+        if "audio_file" in msg:
+            st.audio(msg["audio_file"], autoplay=False)
 
 st.divider()
 
-# --- INPUTS ---
-st.subheader("💬 Talk to Jarvis")
-audio_val = st.audio_input("🎤 Tap to Speak")
+# --- INPUT AREA ---
+col1, col2 = st.columns([4, 1])
+with col1:
+    # TEXT INPUT (Using Streamlit's native chat input)
+    text_input = st.chat_input("Type a message...")
 
-with st.form("text_form", clear_on_submit=True):
-    text_val = st.text_input("📝 Or type here:", placeholder="Ex: Plan my day...")
-    submitted = st.form_submit_button("Send")
+with col2:
+    # AUDIO INPUT
+    audio_val = st.audio_input("🎤")
 
 # --- LOGIC ---
 final_input = None
 input_type = "text"
-should_process = False
+should_run = False
 
-# CHECK 1: IS IT NEW AUDIO? (Fixes the Loop)
+# 1. Check Audio
 if audio_val is not None:
-    if audio_val != st.session_state.last_audio:
+    # Only run if this specific audio blob hasn't been processed yet
+    if audio_val != st.session_state.last_processed_audio:
         final_input = audio_val.read()
         input_type = "audio"
-        st.session_state.last_audio = audio_val # Mark as processed
-        should_process = True
-    else:
-        # It's old audio, do nothing
-        should_process = False
+        should_run = True
+        st.session_state.last_processed_audio = audio_val
 
-# CHECK 2: IS IT NEW TEXT?
-elif submitted and text_val:
-    final_input = text_val
+# 2. Check Text (Only if audio wasn't just triggered)
+if text_input and not should_run:
+    final_input = text_input
     input_type = "text"
-    should_process = True
+    should_run = True
 
-# PROCESS
-if should_process and final_input:
-    # 1. Add User Msg
+# --- EXECUTION ---
+if should_run:
+    # 1. Show User Input
     if input_type == "text":
         st.session_state.chat_history.append({"role": "user", "content": final_input})
+        with st.chat_message("user"):
+            st.write(final_input)
     else:
         st.session_state.chat_history.append({"role": "user", "content": "🎤 [Audio Message]"})
-        
+        with st.chat_message("user"):
+            st.write("🎤 [Audio Message]")
+
     # 2. Run AI
-    with st.spinner("Processing..."):
+    with st.spinner("Thinking..."):
         reply = run_agent(final_input, input_type)
+        display_text = reply
         
-        display_text = reply # Default fallback
-        
-        # 3. Clean JSON Output (Fixes the ugly response)
+        # 3. Parse JSON
         if "{" in reply and "reply_to_user" in reply:
             try:
-                # Extract JSON part even if there is extra text
                 json_str = reply[reply.find("{"):reply.rfind("}")+1]
                 data = json.loads(json_str)
                 
-                # ALWAYS use the clean text from JSON
                 if "reply_to_user" in data:
                     display_text = data["reply_to_user"]
                 
-                # Handle Database Updates
                 if data.get("action") == "update":
                     if "new_memory" in data:
                         update_file("Jarvis_Memory.txt", data["new_memory"])
-                        st.toast("Brain Updated!", icon="🧠")
+                        st.toast("Memory Updated", icon="💾")
                     if "new_tasks" in data:
                         update_file("Jarvis_Tasks.txt", data["new_tasks"])
-                        st.toast("Tasks Updated!", icon="✅")
-            except:
-                pass # Failed to parse, show raw text
-
-        # 4. Add AI Msg
-        st.session_state.chat_history.append({"role": "assistant", "content": display_text})
-        
-        # 5. Rerun to update UI
-        st.rerun()
-
-# --- PLAY AUDIO (After Rerun) ---
-if st.session_state.chat_history:
-    last_msg = st.session_state.chat_history[-1]
-    if last_msg["role"] == "assistant":
-        if "last_spoken_text" not in st.session_state or st.session_state.last_spoken_text != last_msg["content"]:
-            try:
-                clean_text = last_msg["content"].replace("*", "")
-                audio_file = asyncio.run(text_to_speech(clean_text))
-                st.audio(audio_file, autoplay=True)
-                st.session_state.last_spoken_text = last_msg["content"]
+                        st.toast("Tasks Updated", icon="✅")
             except:
                 pass
+        
+        # 4. Generate Audio
+        try:
+            clean_text = display_text.replace("*", "").replace("#", "")
+            audio_path = asyncio.run(text_to_speech(clean_text))
+        except:
+            audio_path = None
+
+        # 5. Show AI Response
+        msg_data = {"role": "assistant", "content": display_text}
+        if audio_path:
+            msg_data["audio_file"] = audio_path
+        
+        st.session_state.chat_history.append(msg_data)
+        
+        with st.chat_message("assistant"):
+            st.write(display_text)
+            if audio_path:
+                st.audio(audio_path, autoplay=True)
 
 # --- BRAIN VIEW ---
 with st.expander("🧠 View Live Memory"):
