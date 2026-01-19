@@ -12,46 +12,38 @@ import json
 # --- CONFIG ---
 st.set_page_config(page_title="Jarvis Mobile", page_icon="🧠", layout="centered")
 
-# --- 1. SETUP CREDENTIALS (FIXED) ---
+# --- 1. SETUP CREDENTIALS ---
 drive_service = None
-cal_service = None
 
 if "FIREBASE_KEY" in st.secrets:
     try:
-        # FIX: Check if Streamlit already converted it to a dict
         secret_data = st.secrets["FIREBASE_KEY"]
         if isinstance(secret_data, str):
-            key_dict = json.loads(secret_data)  # It was a string, so parse it
+            key_dict = json.loads(secret_data)
         else:
-            key_dict = dict(secret_data)        # It was already a dict, just use it
+            key_dict = dict(secret_data)
             
-        # Create Credentials
         creds = service_account.Credentials.from_service_account_info(
             key_dict, 
             scopes=['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/calendar']
         )
         drive_service = build('drive', 'v3', credentials=creds)
-        cal_service = build('calendar', 'v3', credentials=creds)
-        st.toast("Cloud Connected Successfully", icon="☁️")
     except Exception as e:
         st.error(f"Credential Error: {e}")
 
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
-# Use Flash for speed and long context
 model = genai.GenerativeModel('models/gemini-1.5-flash')
 
-# --- 2. DRIVE MEMORY FUNCTIONS ---
+# --- 2. DRIVE FUNCTIONS ---
 def get_file_content(filename):
-    """Reads your long-term memory from Drive"""
-    if not drive_service: return "Error: Drive not connected."
+    if not drive_service: return ""
     try:
         results = drive_service.files().list(
             q=f"name='{filename}' and trashed=false", fields="files(id, name)").execute()
         files = results.get('files', [])
-        
-        if not files: return "" 
+        if not files: return "" # File doesn't exist yet
         
         file_id = files[0]['id']
         request = drive_service.files().get_media(fileId=file_id)
@@ -61,11 +53,10 @@ def get_file_content(filename):
         while done is False:
             status, done = downloader.next_chunk()
         return file_content.getvalue().decode('utf-8')
-    except Exception as e:
-        return f"Error reading memory: {e}"
+    except:
+        return ""
 
 def update_file(filename, new_content):
-    """Overwrites the file with updated memory/tasks"""
     if not drive_service: return False
     try:
         results = drive_service.files().list(
@@ -75,8 +66,7 @@ def update_file(filename, new_content):
         media = MediaIoBaseUpload(io.BytesIO(new_content.encode('utf-8')), mimetype='text/plain')
         
         if not files:
-            file_metadata = {'name': filename, 'parents': []} 
-            # Note: You can add specific folder ID in 'parents' if you want
+            file_metadata = {'name': filename}
             drive_service.files().create(body=file_metadata, media_body=media).execute()
         else:
             file_id = files[0]['id']
@@ -92,67 +82,76 @@ async def text_to_speech(text):
     await communicate.save(out_file)
     return out_file
 
-# --- 4. THE AI AGENT ---
-def run_agent(audio_bytes):
+# --- 4. THE AGENT (HANDLES TEXT & AUDIO) ---
+def run_agent(user_input, input_type="text"):
+    # Read Brain
     memory = get_file_content("Jarvis_Memory.txt")
     tasks = get_file_content("Jarvis_Tasks.txt")
     today = datetime.datetime.now().strftime("%A, %Y-%m-%d")
 
-    prompt = f"""
-    SYSTEM: You are Jarvis, a mobile personal assistant.
+    # The Prompt
+    sys_prompt = f"""
+    SYSTEM: You are Jarvis.
     DATE: {today}
     
-    MY LONG TERM MEMORY:
-    {memory}
-    
-    MY CURRENT TASKS:
-    {tasks}
+    MY MEMORY: {memory if memory else "No memory yet."}
+    MY TASKS: {tasks if tasks else "No tasks yet."}
     
     INSTRUCTION:
-    1. Listen to the user audio.
-    2. Respond helpfully.
-    3. If the user taught you something new, output JSON to update 'Memory'.
-    4. If the user changed plans/tasks, output JSON to update 'Tasks'.
+    1. Reply to the user.
+    2. If user teaches you something, output JSON to update Memory.
+    3. If user changes plans, output JSON to update Tasks.
     
-    OUTPUT FORMAT (JSON ONLY for updates, Plain Text for talk):
+    OUTPUT FORMAT:
     {{ "action": "update", "new_memory": "...", "new_tasks": "...", "reply_to_user": "..." }}
+    OR just plain text if no update needed.
     """
     
     try:
-        response = model.generate_content([prompt, {"mime_type": "audio/wav", "data": audio_bytes}])
+        if input_type == "audio":
+            # Audio Input
+            response = model.generate_content([sys_prompt, {"mime_type": "audio/wav", "data": user_input}])
+        else:
+            # Text Input
+            response = model.generate_content([sys_prompt, f"USER: {user_input}"])
+            
         return response.text
     except Exception as e:
-        return f"AI Error: {e}"
+        return f"Error: {e}"
 
 # --- 5. UI LAYOUT ---
 st.title("🎙️ Jarvis Mobile")
 
-# --- SIDEBAR: MODEL CHECKER ---
-with st.sidebar:
-    st.header("🤖 System Status")
-    if st.button("Check Available Models"):
-        st.write("Fetching models...")
-        try:
-            found_models = []
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    found_models.append(m.name)
-            st.success(f"Access Confirmed! Found {len(found_models)} models.")
-            st.code("\n".join(found_models), language="text")
-        except Exception as e:
-            st.error(f"Error fetching models: {e}")
+# A. Container for Chat History (Optional visual)
+with st.container():
+    if "last_reply" in st.session_state:
+        st.chat_message("assistant").write(st.session_state.last_reply)
 
-# --- MAIN INTERFACE ---
-audio_value = st.audio_input("Tap to Speak")
+# B. INPUTS
+# 1. Audio Widget
+audio_val = st.audio_input("Voice Command")
+# 2. Text Input (Pinned to bottom)
+text_val = st.chat_input("Type a message...")
 
-if audio_value:
+final_input = None
+input_type = "text"
+
+# Check which input was used
+if audio_val:
+    final_input = audio_val.read()
+    input_type = "audio"
+elif text_val:
+    final_input = text_val
+    input_type = "text"
+
+# C. PROCESS INPUT
+if final_input:
     with st.spinner("Thinking..."):
-        audio_bytes = audio_value.read()
-        reply = run_agent(audio_bytes)
+        reply = run_agent(final_input, input_type)
         
-        final_speech = reply
+        display_text = reply
         
-        # Check for JSON actions
+        # Check for JSON updates
         if "{" in reply and "action" in reply:
             try:
                 json_str = reply[reply.find("{"):reply.rfind("}")+1]
@@ -161,27 +160,33 @@ if audio_value:
                 if data.get("action") == "update":
                     if "new_memory" in data:
                         update_file("Jarvis_Memory.txt", data["new_memory"])
-                        st.toast("Memory Saved!", icon="💾")
+                        st.toast("Brain Updated!", icon="🧠")
                     if "new_tasks" in data:
                         update_file("Jarvis_Tasks.txt", data["new_tasks"])
                         st.toast("Tasks Updated!", icon="✅")
-                    final_speech = data.get("reply_to_user", "Updated.")
+                    display_text = data.get("reply_to_user", "Done.")
             except:
-                pass 
-        
-        st.chat_message("assistant").write(final_speech)
-        
-        # Audio Reply
+                pass
+
+        # Save to session state to keep it on screen
+        st.session_state.last_reply = display_text
+        st.chat_message("assistant").write(display_text)
+
+        # Speak it out (Only if audio was used OR user wants it)
+        # We auto-play audio regardless of input type for that "Jarvis" feel
         try:
-            audio_file = asyncio.run(text_to_speech(final_speech.replace("*", "")))
+            audio_file = asyncio.run(text_to_speech(display_text.replace("*", "")))
             st.audio(audio_file, autoplay=True)
         except:
             pass
 
-# View Memory Debugger
-with st.expander("View My Brain"):
-    if drive_service:
-        st.text_area("Memory", get_file_content("Jarvis_Memory.txt"), height=100)
-        st.text_area("Tasks", get_file_content("Jarvis_Tasks.txt"), height=100)
+# D. BRAIN VIEW
+with st.expander("View My Brain (Drive Data)"):
+    mem = get_file_content("Jarvis_Memory.txt")
+    tsk = get_file_content("Jarvis_Tasks.txt")
+    
+    if not mem and not tsk:
+        st.info("Brain is empty. Talk to me to create memories!")
     else:
-        st.warning("Drive not connected. Check secrets.")
+        st.text_area("Memory", mem, height=100)
+        st.text_area("Tasks", tsk, height=100)
