@@ -11,7 +11,7 @@ import json
 import time
 
 # --- CONFIG ---
-st.set_page_config(page_title="Jarvis 2.0", page_icon="⚡", layout="centered")
+st.set_page_config(page_title="Jarvis Pro", page_icon="🧠", layout="centered")
 
 # --- 1. SETUP CREDENTIALS ---
 drive_service = None
@@ -45,6 +45,7 @@ except:
 def get_file_content(filename):
     if not drive_service: return ""
     try:
+        # Prevent caching by adding a unique query param if needed, but here we just re-fetch
         results = drive_service.files().list(
             q=f"name='{filename}' and trashed=false", fields="files(id, name)").execute()
         files = results.get('files', [])
@@ -80,47 +81,60 @@ def update_file(filename, new_content):
     except:
         return False
 
-# --- 3. SPEECH OUTPUT (Fixing Freeze) ---
+# --- 3. SPEECH OUTPUT ---
 async def text_to_speech(text):
-    # Use a unique filename every time to avoid file locking issues
     filename = f"reply_{int(time.time())}.mp3"
     communicate = edge_tts.Communicate(text, "en-US-AriaNeural")
     await communicate.save(filename)
     return filename
 
 # --- 4. THE AGENT ---
-def run_agent(user_input, input_type="text"):
+def run_agent(user_input, input_type, chat_history):
+    # 1. Fetch Long Term Memory (Drive)
     memory = get_file_content("Jarvis_Memory.txt")
     tasks = get_file_content("Jarvis_Tasks.txt")
+    
+    # 2. Format Short Term Context (Last 15 messages)
+    # We take the last 15 items to keep the prompt focused but aware of context
+    recent_chat = ""
+    for msg in chat_history[-15:]:
+        role = "USER" if msg["role"] == "user" else "JARVIS"
+        content = msg["content"].replace("🎤 [Audio Message]", "[Audio Data]")
+        recent_chat += f"{role}: {content}\n"
+
     today = datetime.datetime.now().strftime("%A, %Y-%m-%d")
 
-    if not memory: memory = "User has not introduced themselves yet."
-
+    # 3. Construct the Master Prompt
     sys_prompt = f"""
     SYSTEM: You are Jarvis.
     DATE: {today}
     
-    MY LONG TERM MEMORY:
-    {memory}
+    === LONG TERM MEMORY (FROM DRIVE) ===
+    {memory if memory else "No long term memories yet."}
     
-    MY CURRENT TASKS:
-    {tasks}
+    === CURRENT TASKS (FROM DRIVE) ===
+    {tasks if tasks else "No tasks list yet."}
     
-    INSTRUCTIONS:
-    1. Answer the user clearly.
-    2. IMPORTANT: If user provides new info, output JSON to update 'Memory'.
-    3. IMPORTANT: If plans change, output JSON to update 'Tasks'.
-    4. IF NO UPDATE NEEDED: Output JSON with action="none".
+    === RECENT CONVERSATION (SHORT TERM CONTEXT) ===
+    {recent_chat}
     
-    OUTPUT FORMAT (ALWAYS JSON):
-    {{ "action": "update", "new_memory": "...", "new_tasks": "...", "reply_to_user": "..." }}
+    === INSTRUCTIONS ===
+    1. Answer the user naturally based on the conversation history and memory.
+    2. UPDATE MEMORY: If the user explicitly teaches you a fact or preference, output JSON to update 'Memory'.
+    3. UPDATE TASKS: If the user changes plans or adds to-dos, output JSON to update 'Tasks'.
+    4. NO UPDATES: If just chatting, output JSON with action="none".
+    
+    === OUTPUT FORMAT (JSON ONLY) ===
+    {{ "action": "update", "new_memory": "full text of updated memory...", "new_tasks": "full text of updated tasks...", "reply_to_user": "..." }}
     OR
     {{ "action": "none", "reply_to_user": "..." }}
     """
     
     try:
+        # We assume the 'user_input' is the latest message.
+        # If audio, we send audio + prompt. If text, we send text + prompt.
         if input_type == "audio":
-            response = model.generate_content([sys_prompt, {"mime_type": "audio/wav", "data": user_input}])
+            response = model.generate_content([sys_prompt, "USER (Audio):", {"mime_type": "audio/wav", "data": user_input}])
         else:
             response = model.generate_content([sys_prompt, f"USER: {user_input}"])
         return response.text
@@ -128,7 +142,7 @@ def run_agent(user_input, input_type="text"):
         return f"AI Error: {e}"
 
 # --- 5. UI LAYOUT ---
-st.title("⚡ Jarvis 2.0")
+st.title("🧠 Jarvis Pro")
 
 # --- SESSION STATE ---
 if "chat_history" not in st.session_state:
@@ -140,7 +154,6 @@ if "last_processed_audio" not in st.session_state:
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
-        # If this message has audio associated with it, show the player
         if "audio_file" in msg:
             st.audio(msg["audio_file"], autoplay=False)
 
@@ -149,11 +162,8 @@ st.divider()
 # --- INPUT AREA ---
 col1, col2 = st.columns([4, 1])
 with col1:
-    # TEXT INPUT (Using Streamlit's native chat input)
     text_input = st.chat_input("Type a message...")
-
 with col2:
-    # AUDIO INPUT
     audio_val = st.audio_input("🎤")
 
 # --- LOGIC ---
@@ -161,16 +171,13 @@ final_input = None
 input_type = "text"
 should_run = False
 
-# 1. Check Audio
 if audio_val is not None:
-    # Only run if this specific audio blob hasn't been processed yet
     if audio_val != st.session_state.last_processed_audio:
         final_input = audio_val.read()
         input_type = "audio"
         should_run = True
         st.session_state.last_processed_audio = audio_val
 
-# 2. Check Text (Only if audio wasn't just triggered)
 if text_input and not should_run:
     final_input = text_input
     input_type = "text"
@@ -178,7 +185,7 @@ if text_input and not should_run:
 
 # --- EXECUTION ---
 if should_run:
-    # 1. Show User Input
+    # 1. UI: Show User Input
     if input_type == "text":
         st.session_state.chat_history.append({"role": "user", "content": final_input})
         with st.chat_message("user"):
@@ -188,12 +195,13 @@ if should_run:
         with st.chat_message("user"):
             st.write("🎤 [Audio Message]")
 
-    # 2. Run AI
-    with st.spinner("Thinking..."):
-        reply = run_agent(final_input, input_type)
-        display_text = reply
+    # 2. Logic: Run AI with History
+    with st.spinner("Processing..."):
+        # Pass the history to the agent!
+        reply = run_agent(final_input, input_type, st.session_state.chat_history)
+        display_text = reply 
         
-        # 3. Parse JSON
+        # 3. Parse JSON Response
         if "{" in reply and "reply_to_user" in reply:
             try:
                 json_str = reply[reply.find("{"):reply.rfind("}")+1]
@@ -205,13 +213,13 @@ if should_run:
                 if data.get("action") == "update":
                     if "new_memory" in data:
                         update_file("Jarvis_Memory.txt", data["new_memory"])
-                        st.toast("Memory Updated", icon="💾")
+                        st.toast("Memory File Updated", icon="💾")
                     if "new_tasks" in data:
                         update_file("Jarvis_Tasks.txt", data["new_tasks"])
-                        st.toast("Tasks Updated", icon="✅")
+                        st.toast("Tasks File Updated", icon="✅")
             except:
                 pass
-        
+
         # 4. Generate Audio
         try:
             clean_text = display_text.replace("*", "").replace("#", "")
@@ -219,7 +227,7 @@ if should_run:
         except:
             audio_path = None
 
-        # 5. Show AI Response
+        # 5. UI: Show Assistant Response
         msg_data = {"role": "assistant", "content": display_text}
         if audio_path:
             msg_data["audio_file"] = audio_path
@@ -231,8 +239,17 @@ if should_run:
             if audio_path:
                 st.audio(audio_path, autoplay=True)
 
-# --- BRAIN VIEW ---
-with st.expander("🧠 View Live Memory"):
+# --- BRAIN VIEW (Improved) ---
+with st.expander("🧠 View Live Memory (Click Refresh to Check)"):
+    if st.button("🔄 Refresh Brain Data"):
+        # This button forces the UI to redraw, calling get_file_content again
+        st.rerun()
+
     if drive_service:
-        st.text_area("Memory", get_file_content("Jarvis_Memory.txt"), height=100)
-        st.text_area("Tasks", get_file_content("Jarvis_Tasks.txt"), height=100)
+        mem_content = get_file_content("Jarvis_Memory.txt")
+        task_content = get_file_content("Jarvis_Tasks.txt")
+        
+        st.caption("This data is stored in your Google Drive.")
+        st.text_area("Long Term Memory", mem_content, height=150)
+        st.text_area("Current Tasks", task_content, height=150)
+        
