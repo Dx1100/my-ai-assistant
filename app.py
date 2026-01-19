@@ -88,14 +88,13 @@ async def text_to_speech(text):
     await communicate.save(filename)
     return filename
 
-# --- 4. THE AGENT ---
+# --- 4. THE AGENT (WITH RETRY LOGIC) ---
 def run_agent(user_input, input_type, chat_history):
-    # 1. Fetch Long Term Memory (Drive)
+    # 1. Fetch Long Term Memory
     memory = get_file_content("Jarvis_Memory.txt")
     tasks = get_file_content("Jarvis_Tasks.txt")
     
-    # 2. Format Short Term Context (Last 15 messages)
-    # We take the last 15 items to keep the prompt focused but aware of context
+    # 2. Format Context
     recent_chat = ""
     for msg in chat_history[-15:]:
         role = "USER" if msg["role"] == "user" else "JARVIS"
@@ -104,42 +103,52 @@ def run_agent(user_input, input_type, chat_history):
 
     today = datetime.datetime.now().strftime("%A, %Y-%m-%d")
 
-    # 3. Construct the Master Prompt
+    # 3. Prompt
     sys_prompt = f"""
     SYSTEM: You are Jarvis.
     DATE: {today}
     
-    === LONG TERM MEMORY (FROM DRIVE) ===
-    {memory if memory else "No long term memories yet."}
+    === LONG TERM MEMORY ===
+    {memory if memory else "No memory yet."}
     
-    === CURRENT TASKS (FROM DRIVE) ===
-    {tasks if tasks else "No tasks list yet."}
+    === CURRENT TASKS ===
+    {tasks if tasks else "No tasks yet."}
     
-    === RECENT CONVERSATION (SHORT TERM CONTEXT) ===
+    === RECENT CHAT ===
     {recent_chat}
     
-    === INSTRUCTIONS ===
-    1. Answer the user naturally based on the conversation history and memory.
-    2. UPDATE MEMORY: If the user explicitly teaches you a fact or preference, output JSON to update 'Memory'.
-    3. UPDATE TASKS: If the user changes plans or adds to-dos, output JSON to update 'Tasks'.
-    4. NO UPDATES: If just chatting, output JSON with action="none".
+    INSTRUCTIONS:
+    1. Answer naturally.
+    2. UPDATE MEMORY: Output JSON if user teaches facts.
+    3. UPDATE TASKS: Output JSON if user changes plans.
+    4. NO UPDATE: Output JSON with action="none".
     
-    === OUTPUT FORMAT (JSON ONLY) ===
-    {{ "action": "update", "new_memory": "full text of updated memory...", "new_tasks": "full text of updated tasks...", "reply_to_user": "..." }}
+    OUTPUT FORMAT (JSON):
+    {{ "action": "update", "new_memory": "...", "new_tasks": "...", "reply_to_user": "..." }}
     OR
     {{ "action": "none", "reply_to_user": "..." }}
     """
     
-    try:
-        # We assume the 'user_input' is the latest message.
-        # If audio, we send audio + prompt. If text, we send text + prompt.
-        if input_type == "audio":
-            response = model.generate_content([sys_prompt, "USER (Audio):", {"mime_type": "audio/wav", "data": user_input}])
-        else:
-            response = model.generate_content([sys_prompt, f"USER: {user_input}"])
-        return response.text
-    except Exception as e:
-        return f"AI Error: {e}"
+    # --- RETRY LOOP (FIX FOR 429 ERROR) ---
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            if input_type == "audio":
+                response = model.generate_content([sys_prompt, "USER (Audio):", {"mime_type": "audio/wav", "data": user_input}])
+            else:
+                response = model.generate_content([sys_prompt, f"USER: {user_input}"])
+            return response.text
+            
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str:
+                # If we hit the speed limit, wait and try again
+                time.sleep(2 * (attempt + 1)) # Wait 2s, then 4s, then 6s
+                continue
+            else:
+                return f"AI Error: {e}"
+    
+    return "I am overloaded right now. Please wait 10 seconds."
 
 # --- 5. UI LAYOUT ---
 st.title("🧠 Jarvis Pro")
