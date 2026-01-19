@@ -12,10 +12,9 @@ import time
 import pypdf 
 
 # --- CONFIG ---
-st.set_page_config(page_title="Jarvis Pro", page_icon="🧠", layout="centered")
+st.set_page_config(page_title="Jarvis Pro", page_icon="🧠", layout="wide")
 
-# !!! IMPORTANT: PUT YOUR EMAIL HERE !!!
-# This allows the robot to share the memory files with you so you can see them.
+# !!! REPLACE WITH YOUR EMAIL !!!
 MY_EMAIL = "mybusiness110010@gmail.com" 
 
 # --- 1. SETUP CREDENTIALS ---
@@ -40,42 +39,30 @@ if "FIREBASE_KEY" in st.secrets:
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
-# Model Setup
 try:
     model = genai.GenerativeModel('models/gemini-2.0-flash')
 except:
     model = genai.GenerativeModel('models/gemini-1.5-flash')
 
-# --- 2. DRIVE FUNCTIONS (FIXED SHARING) ---
+# --- 2. DRIVE FUNCTIONS ---
 def share_file_with_user(file_id):
-    """Shares the file with your personal email so you can see it"""
     try:
-        user_permission = {
-            'type': 'user',
-            'role': 'writer',
-            'emailAddress': mybusiness110010@gmail.com
-        }
+        user_permission = {'type': 'user', 'role': 'writer', 'emailAddress': MY_EMAIL}
         drive_service.permissions().create(
-            fileId=file_id,
-            body=user_permission,
-            fields='id',
+            fileId=file_id, body=user_permission, fields='id'
         ).execute()
-    except Exception as e:
-        # If already shared, it might error, which is fine
-        pass
+    except: pass
 
 def get_file_content(filename):
-    if not drive_service: return ""
+    if not drive_service: return "Error: Drive Disconnected"
     try:
         results = drive_service.files().list(
             q=f"name='{filename}' and trashed=false", fields="files(id, name)").execute()
         files = results.get('files', [])
-        if not files: return "" 
+        if not files: return "Empty (File not created yet)" 
         
         file_id = files[0]['id']
-        
-        # --- AUTO FIX: Share it if found but not visible to you ---
-        share_file_with_user(file_id)
+        share_file_with_user(file_id) # Ensure you can see it
         
         request = drive_service.files().get_media(fileId=file_id)
         file_content = io.BytesIO()
@@ -84,8 +71,8 @@ def get_file_content(filename):
         while done is False:
             status, done = downloader.next_chunk()
         return file_content.getvalue().decode('utf-8')
-    except:
-        return ""
+    except Exception as e:
+        return f"Read Error: {e}"
 
 def update_file(filename, new_content):
     if not drive_service: return False
@@ -97,16 +84,12 @@ def update_file(filename, new_content):
         media = MediaIoBaseUpload(io.BytesIO(new_content.encode('utf-8')), mimetype='text/plain')
         
         if not files:
-            # Create NEW file
             file_metadata = {'name': filename}
             file = drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-            # SHARE IT IMMEDIATELY
             share_file_with_user(file.get('id'))
         else:
-            # Update EXISTING
             file_id = files[0]['id']
             drive_service.files().update(fileId=file_id, media_body=media).execute()
-            # Ensure it is shared
             share_file_with_user(file_id)
         return True
     except:
@@ -127,8 +110,7 @@ def process_pdf_upload(uploaded_file):
         for page in pdf_reader.pages:
             text += page.extract_text() + "\n"
         return text
-    except Exception as e:
-        return None
+    except: return None
 
 # --- 5. THE AGENT ---
 def run_agent(user_input, input_type, chat_history):
@@ -148,10 +130,10 @@ def run_agent(user_input, input_type, chat_history):
     DATE: {today}
     
     === LONG TERM MEMORY ===
-    {memory if memory else "No memory yet."}
+    {memory[:20000] if memory else "No memory yet."}
     
     === CURRENT TASKS ===
-    {tasks if tasks else "No tasks yet."}
+    {tasks[:5000] if tasks else "No tasks yet."}
     
     === RECENT CONVERSATION ===
     {recent_chat}
@@ -183,16 +165,17 @@ def run_agent(user_input, input_type, chat_history):
 # --- 6. UI LAYOUT ---
 st.title("🧠 Jarvis Pro")
 
-# --- SIDEBAR: KNOWLEDGE UPLOAD ---
+# --- SIDEBAR (MEMORY & UPLOAD) ---
 with st.sidebar:
-    st.header("📚 Add Knowledge")
-    uploaded_file = st.file_uploader("Upload PDF to Memory", type=["pdf"])
+    st.header("📚 Knowledge Base")
     
-    if uploaded_file and st.button("Process & Memorize"):
-        with st.spinner("Reading Document..."):
+    # 1. PDF Upload
+    uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+    if uploaded_file and st.button("Memorize PDF"):
+        with st.spinner("Reading..."):
             raw_text = process_pdf_upload(uploaded_file)
             if raw_text:
-                st.info("Extracting key facts...")
+                st.info("Extracting facts...")
                 upload_prompt = f"Summarize key knowledge from this text and add to Long Term Memory. \n\nDOC:\n{raw_text[:30000]}"
                 reply = run_agent(upload_prompt, "text", st.session_state.get("chat_history", []))
                 
@@ -201,16 +184,38 @@ with st.sidebar:
                      data = json.loads(json_str)
                      update_file("Jarvis_Memory.txt", data["new_memory"])
                      st.success("Knowledge Added!")
+                     time.sleep(1)
+                     st.rerun() # Refresh to show new memory
             else:
-                st.error("Could not read PDF.")
+                st.error("Read Failed.")
 
-# --- SESSION STATE ---
+    st.divider()
+    
+    # 2. Memory Viewer (MOVED HERE TO BE VISIBLE)
+    st.subheader("🧠 Live Brain Data")
+    if st.button("🔄 Refresh Memory"):
+        st.rerun()
+        
+    if drive_service:
+        # We assume if it returns "Error", drive isn't connected
+        mem_text = get_file_content("Jarvis_Memory.txt")
+        task_text = get_file_content("Jarvis_Tasks.txt")
+        
+        with st.expander("Long Term Memory", expanded=True):
+            st.text_area("Mem", mem_text, height=200, label_visibility="collapsed")
+            
+        with st.expander("Current Tasks", expanded=False):
+            st.text_area("Tasks", task_text, height=200, label_visibility="collapsed")
+    else:
+        st.error("Drive Not Connected")
+
+# --- MAIN CHAT INTERFACE ---
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "last_processed_audio" not in st.session_state:
     st.session_state.last_processed_audio = None
 
-# --- DISPLAY HISTORY ---
+# Display Chat
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
@@ -219,14 +224,14 @@ for msg in st.session_state.chat_history:
 
 st.divider()
 
-# --- INPUT AREA ---
+# Input Area
 col1, col2 = st.columns([4, 1])
 with col1:
     text_input = st.chat_input("Type a message...")
 with col2:
     audio_val = st.audio_input("🎤")
 
-# --- LOGIC ---
+# Logic
 final_input = None
 input_type = "text"
 should_run = False
@@ -282,9 +287,3 @@ if should_run:
         with st.chat_message("assistant"):
             st.write(display_text)
             if audio_path: st.audio(audio_path, autoplay=True)
-
-with st.expander("🧠 View Live Memory"):
-    if st.button("🔄 Refresh"): st.rerun()
-    if drive_service:
-        st.text_area("Long Term Memory", get_file_content("Jarvis_Memory.txt"), height=150)
-        st.text_area("Current Tasks", get_file_content("Jarvis_Tasks.txt"), height=150)
