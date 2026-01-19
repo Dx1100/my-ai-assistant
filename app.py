@@ -34,8 +34,7 @@ if "FIREBASE_KEY" in st.secrets:
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
-# --- MODEL SETUP ---
-# Tries to find the best available Flash model
+# Try to find the best available Flash model
 try:
     model = genai.GenerativeModel('models/gemini-2.0-flash')
 except:
@@ -109,10 +108,12 @@ def run_agent(user_input, input_type="text"):
     1. Answer the user clearly.
     2. IMPORTANT: If user provides new info, output JSON to update 'Memory'.
     3. IMPORTANT: If plans change, output JSON to update 'Tasks'.
+    4. IF NO UPDATE NEEDED: Output JSON with action="none".
     
-    OUTPUT FORMAT:
+    OUTPUT FORMAT (ALWAYS JSON):
     {{ "action": "update", "new_memory": "...", "new_tasks": "...", "reply_to_user": "..." }}
-    OR just plain text if no update needed.
+    OR
+    {{ "action": "none", "reply_to_user": "..." }}
     """
     
     try:
@@ -127,43 +128,52 @@ def run_agent(user_input, input_type="text"):
 # --- 5. UI LAYOUT ---
 st.title("⚡ Jarvis 2.0")
 
-# --- SESSION STATE FOR CHAT ---
+# --- INITIALIZE SESSION STATE ---
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+if "last_audio" not in st.session_state:
+    st.session_state.last_audio = None
 
-# --- DISPLAY CHAT HISTORY ---
-# We show history first so it looks like a real chat app
+# --- DISPLAY HISTORY ---
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
 
-st.divider() # Line separator
+st.divider()
 
-# --- CONTROLS AREA ---
+# --- INPUTS ---
 st.subheader("💬 Talk to Jarvis")
-
-# 1. AUDIO INPUT
 audio_val = st.audio_input("🎤 Tap to Speak")
 
-# 2. TEXT INPUT (Standard Box)
 with st.form("text_form", clear_on_submit=True):
     text_val = st.text_input("📝 Or type here:", placeholder="Ex: Plan my day...")
-    submitted = st.form_submit_button("Send Text")
+    submitted = st.form_submit_button("Send")
 
-# --- LOGIC HANDLER ---
+# --- LOGIC ---
 final_input = None
 input_type = "text"
+should_process = False
 
-# Priority: Audio triggers immediately. Text triggers on button press.
-if audio_val:
-    final_input = audio_val.read()
-    input_type = "audio"
+# CHECK 1: IS IT NEW AUDIO? (Fixes the Loop)
+if audio_val is not None:
+    if audio_val != st.session_state.last_audio:
+        final_input = audio_val.read()
+        input_type = "audio"
+        st.session_state.last_audio = audio_val # Mark as processed
+        should_process = True
+    else:
+        # It's old audio, do nothing
+        should_process = False
+
+# CHECK 2: IS IT NEW TEXT?
 elif submitted and text_val:
     final_input = text_val
     input_type = "text"
+    should_process = True
 
-if final_input:
-    # 1. Add User Msg to History (Visually)
+# PROCESS
+if should_process and final_input:
+    # 1. Add User Msg
     if input_type == "text":
         st.session_state.chat_history.append({"role": "user", "content": final_input})
     else:
@@ -173,14 +183,20 @@ if final_input:
     with st.spinner("Processing..."):
         reply = run_agent(final_input, input_type)
         
-        display_text = reply
+        display_text = reply # Default fallback
         
-        # 3. Handle JSON Updates
-        if "{" in reply and "action" in reply:
+        # 3. Clean JSON Output (Fixes the ugly response)
+        if "{" in reply and "reply_to_user" in reply:
             try:
+                # Extract JSON part even if there is extra text
                 json_str = reply[reply.find("{"):reply.rfind("}")+1]
                 data = json.loads(json_str)
                 
+                # ALWAYS use the clean text from JSON
+                if "reply_to_user" in data:
+                    display_text = data["reply_to_user"]
+                
+                # Handle Database Updates
                 if data.get("action") == "update":
                     if "new_memory" in data:
                         update_file("Jarvis_Memory.txt", data["new_memory"])
@@ -188,36 +204,30 @@ if final_input:
                     if "new_tasks" in data:
                         update_file("Jarvis_Tasks.txt", data["new_tasks"])
                         st.toast("Tasks Updated!", icon="✅")
-                    display_text = data.get("reply_to_user", "Done.")
             except:
-                pass
+                pass # Failed to parse, show raw text
 
-        # 4. Add AI Msg to History
+        # 4. Add AI Msg
         st.session_state.chat_history.append({"role": "assistant", "content": display_text})
         
-        # 5. Force Rerun to update chat list immediately
+        # 5. Rerun to update UI
         st.rerun()
 
-# --- PLAY AUDIO ---
-# This runs after the rerun, effectively playing the last AI message if it's new
+# --- PLAY AUDIO (After Rerun) ---
 if st.session_state.chat_history:
     last_msg = st.session_state.chat_history[-1]
     if last_msg["role"] == "assistant":
-        # Check if we already played this exact message to avoid looping (simple check)
-        if "last_spoken" not in st.session_state or st.session_state.last_spoken != last_msg["content"]:
+        if "last_spoken_text" not in st.session_state or st.session_state.last_spoken_text != last_msg["content"]:
             try:
-                # Quick clean of asterisks for speech
                 clean_text = last_msg["content"].replace("*", "")
                 audio_file = asyncio.run(text_to_speech(clean_text))
                 st.audio(audio_file, autoplay=True)
-                st.session_state.last_spoken = last_msg["content"]
+                st.session_state.last_spoken_text = last_msg["content"]
             except:
                 pass
 
-# --- BRAIN MONITOR ---
+# --- BRAIN VIEW ---
 with st.expander("🧠 View Live Memory"):
     if drive_service:
         st.text_area("Memory", get_file_content("Jarvis_Memory.txt"), height=100)
         st.text_area("Tasks", get_file_content("Jarvis_Tasks.txt"), height=100)
-    else:
-        st.error("Drive disconnected.")
