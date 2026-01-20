@@ -16,25 +16,40 @@ st.set_page_config(page_title="Jarvis Pro", page_icon="🧠", layout="wide")
 
 # !!! REPLACE WITH YOUR EMAIL !!!
 MY_EMAIL = "mybusiness110010@gmail.com" 
+# !!! REPLACE WITH YOUR CALENDAR ID (Usually just your email) !!!
+CALENDAR_ID = "mybusiness110010@gmail.com"
 
-# --- 1. SETUP CREDENTIALS ---
+# --- 1. SETUP CREDENTIALS (THE FIX) ---
 drive_service = None
+cal_service = None
 
-if "FIREBASE_KEY" in st.secrets:
-    try:
-        secret_data = st.secrets["FIREBASE_KEY"]
-        if isinstance(secret_data, str):
-            key_dict = json.loads(secret_data)
-        else:
-            key_dict = dict(secret_data)
-            
+try:
+    # 1. Try to find the JSON string (Universal Finder)
+    key_dict = None
+    
+    # Check if it's at the top level
+    if "FIREBASE_JSON_STR" in st.secrets:
+        key_dict = json.loads(st.secrets["FIREBASE_JSON_STR"])
+    # Check if it's nested under [FIREBASE_KEY] (Likely scenario)
+    elif "FIREBASE_KEY" in st.secrets and "FIREBASE_JSON_STR" in st.secrets["FIREBASE_KEY"]:
+        key_dict = json.loads(st.secrets["FIREBASE_KEY"]["FIREBASE_JSON_STR"])
+    # Check if it's the old format (Individual keys)
+    elif "FIREBASE_KEY" in st.secrets:
+        key_dict = dict(st.secrets["FIREBASE_KEY"])
+        
+    if key_dict:
+        # Create Credentials
         creds = service_account.Credentials.from_service_account_info(
             key_dict, 
-            scopes=['https://www.googleapis.com/auth/drive']
+            scopes=['https://www.googleapis.com/auth/drive', 'https://www.googleapis.com/auth/calendar']
         )
         drive_service = build('drive', 'v3', credentials=creds)
-    except Exception as e:
-        st.error(f"Credential Error: {e}")
+        cal_service = build('calendar', 'v3', credentials=creds)
+    else:
+        st.error("Credentials not found in Secrets.")
+        
+except Exception as e:
+    st.error(f"Credential Error: {e}")
 
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
@@ -54,15 +69,15 @@ def share_file_with_user(file_id):
     except: pass
 
 def get_file_content(filename):
-    if not drive_service: return "Error: Drive Disconnected"
+    if not drive_service: return ""
     try:
         results = drive_service.files().list(
             q=f"name='{filename}' and trashed=false", fields="files(id, name)").execute()
         files = results.get('files', [])
-        if not files: return "Empty (File not created yet)" 
+        if not files: return "" 
         
         file_id = files[0]['id']
-        share_file_with_user(file_id) # Ensure you can see it
+        share_file_with_user(file_id)
         
         request = drive_service.files().get_media(fileId=file_id)
         file_content = io.BytesIO()
@@ -71,8 +86,7 @@ def get_file_content(filename):
         while done is False:
             status, done = downloader.next_chunk()
         return file_content.getvalue().decode('utf-8')
-    except Exception as e:
-        return f"Read Error: {e}"
+    except: return ""
 
 def update_file(filename, new_content):
     if not drive_service: return False
@@ -92,17 +106,51 @@ def update_file(filename, new_content):
             drive_service.files().update(fileId=file_id, media_body=media).execute()
             share_file_with_user(file_id)
         return True
-    except:
-        return False
+    except: return False
 
-# --- 3. SPEECH OUTPUT ---
+# --- 3. CALENDAR FUNCTIONS ---
+def get_upcoming_events():
+    if not cal_service: return "Calendar not connected."
+    try:
+        now = datetime.datetime.utcnow().isoformat() + 'Z'
+        events_result = cal_service.events().list(
+            calendarId=CALENDAR_ID, timeMin=now,
+            maxResults=5, singleEvents=True,
+            orderBy='startTime').execute()
+        events = events_result.get('items', [])
+        if not events: return "No upcoming events."
+        
+        event_list = []
+        for event in events:
+            start = event['start'].get('dateTime', event['start'].get('date'))
+            event_list.append(f"- {start}: {event['summary']}")
+        return "\n".join(event_list)
+    except Exception as e:
+        return f"Calendar Error: {e}"
+
+def add_calendar_event(summary, start_time_str):
+    if not cal_service: return False
+    try:
+        # Accepted format: "2025-01-20T15:00:00"
+        start_dt = datetime.datetime.fromisoformat(start_time_str)
+        end_dt = start_dt + datetime.timedelta(hours=1) 
+        
+        event = {
+            'summary': summary,
+            'start': {'dateTime': start_dt.isoformat(), 'timeZone': 'Asia/Kolkata'},
+            'end': {'dateTime': end_dt.isoformat(), 'timeZone': 'Asia/Kolkata'},
+        }
+        cal_service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
+        return True
+    except: return False
+
+# --- 4. UTILS ---
 async def text_to_speech(text):
     filename = f"reply_{int(time.time())}.mp3"
     communicate = edge_tts.Communicate(text, "en-US-AriaNeural")
     await communicate.save(filename)
     return filename
 
-# --- 4. PDF PROCESSING ---
 def process_pdf_upload(uploaded_file):
     try:
         pdf_reader = pypdf.PdfReader(uploaded_file)
@@ -114,38 +162,47 @@ def process_pdf_upload(uploaded_file):
 
 # --- 5. THE AGENT ---
 def run_agent(user_input, input_type, chat_history):
+    # Fetch Data
     memory = get_file_content("Jarvis_Memory.txt")
     tasks = get_file_content("Jarvis_Tasks.txt")
+    calendar = get_upcoming_events()
     
     recent_chat = ""
-    for msg in chat_history[-10:]:
+    for msg in chat_history[-8:]:
         role = "USER" if msg["role"] == "user" else "JARVIS"
         content = msg["content"].replace("🎤 [Audio Message]", "[Audio Data]")
         recent_chat += f"{role}: {content}\n"
 
-    today = datetime.datetime.now().strftime("%A, %Y-%m-%d")
+    today = datetime.datetime.now().strftime("%A, %Y-%m-%d %H:%M")
 
     sys_prompt = f"""
     SYSTEM: You are Jarvis.
-    DATE: {today}
+    DATE/TIME: {today} (Asia/Kolkata)
     
     === LONG TERM MEMORY ===
-    {memory[:20000] if memory else "No memory yet."}
+    {memory[:15000] if memory else "Empty"}
     
-    === CURRENT TASKS ===
-    {tasks[:5000] if tasks else "No tasks yet."}
+    === UPCOMING CALENDAR ===
+    {calendar}
     
-    === RECENT CONVERSATION ===
+    === CURRENT TASK LIST ===
+    {tasks[:5000] if tasks else "Empty"}
+    
+    === RECENT CHAT ===
     {recent_chat}
     
     === INSTRUCTIONS ===
     1. Answer naturally.
-    2. UPDATE MEMORY: Output JSON to update 'Memory' with new facts.
-    3. UPDATE TASKS: Output JSON to update 'Tasks' with plans.
-    4. NO UPDATE: Output JSON with action="none".
+    2. SCHEDULE: If user wants to schedule something, output JSON with action="schedule". Format time as ISO (YYYY-MM-DDTHH:MM:SS).
+    3. MEMORY: If new facts, output JSON with action="update_memory".
+    4. TASKS: If general to-dos (not specific time), output JSON with action="update_tasks".
     
     === OUTPUT FORMAT (JSON ONLY) ===
-    {{ "action": "update", "new_memory": "...", "new_tasks": "...", "reply_to_user": "..." }}
+    {{ "action": "schedule", "summary": "Meeting with X", "time": "2025-10-20T14:00:00", "reply_to_user": "Scheduled..." }}
+    OR
+    {{ "action": "update_memory", "new_memory": "...", "reply_to_user": "..." }}
+    OR
+    {{ "action": "update_tasks", "new_tasks": "...", "reply_to_user": "..." }}
     OR
     {{ "action": "none", "reply_to_user": "..." }}
     """
@@ -165,71 +222,45 @@ def run_agent(user_input, input_type, chat_history):
 # --- 6. UI LAYOUT ---
 st.title("🧠 Jarvis Pro")
 
-# --- SIDEBAR (MEMORY & UPLOAD) ---
 with st.sidebar:
-    st.header("📚 Knowledge Base")
-    
-    # 1. PDF Upload
+    st.header("📚 Knowledge")
     uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
-    if uploaded_file and st.button("Memorize PDF"):
+    if uploaded_file and st.button("Memorize"):
         with st.spinner("Reading..."):
             raw_text = process_pdf_upload(uploaded_file)
             if raw_text:
-                st.info("Extracting facts...")
-                upload_prompt = f"Summarize key knowledge from this text and add to Long Term Memory. \n\nDOC:\n{raw_text[:30000]}"
-                reply = run_agent(upload_prompt, "text", st.session_state.get("chat_history", []))
-                
-                if "{" in reply and "new_memory" in reply:
-                     json_str = reply[reply.find("{"):reply.rfind("}")+1]
-                     data = json.loads(json_str)
-                     update_file("Jarvis_Memory.txt", data["new_memory"])
-                     st.success("Knowledge Added!")
-                     time.sleep(1)
-                     st.rerun() # Refresh to show new memory
-            else:
-                st.error("Read Failed.")
+                prompt = f"Summarize and add to memory:\n{raw_text[:20000]}"
+                reply = run_agent(prompt, "text", [])
+                if "{" in reply:
+                     try:
+                         data = json.loads(reply[reply.find("{"):reply.rfind("}")+1])
+                         if "new_memory" in data:
+                             update_file("Jarvis_Memory.txt", data["new_memory"])
+                             st.success("Memorized!")
+                     except: pass
 
     st.divider()
+    if st.button("🔄 Refresh Data"): st.rerun()
     
-    # 2. Memory Viewer (MOVED HERE TO BE VISIBLE)
-    st.subheader("🧠 Live Brain Data")
-    if st.button("🔄 Refresh Memory"):
-        st.rerun()
-        
     if drive_service:
-        # We assume if it returns "Error", drive isn't connected
-        mem_text = get_file_content("Jarvis_Memory.txt")
-        task_text = get_file_content("Jarvis_Tasks.txt")
-        
-        with st.expander("Long Term Memory", expanded=True):
-            st.text_area("Mem", mem_text, height=200, label_visibility="collapsed")
-            
-        with st.expander("Current Tasks", expanded=False):
-            st.text_area("Tasks", task_text, height=200, label_visibility="collapsed")
-    else:
-        st.error("Drive Not Connected")
+        mem = get_file_content("Jarvis_Memory.txt")
+        cal = get_upcoming_events()
+        with st.expander("Memory", expanded=False): st.write(mem)
+        with st.expander("Calendar", expanded=True): st.write(cal)
 
-# --- MAIN CHAT INTERFACE ---
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-if "last_processed_audio" not in st.session_state:
-    st.session_state.last_processed_audio = None
+# Chat UI
+if "chat_history" not in st.session_state: st.session_state.chat_history = []
+if "last_processed_audio" not in st.session_state: st.session_state.last_processed_audio = None
 
-# Display Chat
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
-        if "audio_file" in msg:
-            st.audio(msg["audio_file"], autoplay=False)
+        if "audio_file" in msg: st.audio(msg["audio_file"], autoplay=False)
 
 st.divider()
-
-# Input Area
 col1, col2 = st.columns([4, 1])
-with col1:
-    text_input = st.chat_input("Type a message...")
-with col2:
-    audio_val = st.audio_input("🎤")
+with col1: text_input = st.chat_input("Type a message...")
+with col2: audio_val = st.audio_input("🎤")
 
 # Logic
 final_input = None
@@ -251,30 +282,33 @@ if text_input and not should_run:
 if should_run:
     if input_type == "text":
         st.session_state.chat_history.append({"role": "user", "content": final_input})
-        with st.chat_message("user"):
-            st.write(final_input)
+        with st.chat_message("user"): st.write(final_input)
     else:
-        st.session_state.chat_history.append({"role": "user", "content": "🎤 [Audio Message]"})
-        with st.chat_message("user"):
-            st.write("🎤 [Audio Message]")
+        st.session_state.chat_history.append({"role": "user", "content": "🎤 [Audio]"})
+        with st.chat_message("user"): st.write("🎤 [Audio]")
 
     with st.spinner("Processing..."):
         reply = run_agent(final_input, input_type, st.session_state.chat_history)
         display_text = reply 
         
+        # JSON Parsing
         if "{" in reply and "reply_to_user" in reply:
             try:
                 json_str = reply[reply.find("{"):reply.rfind("}")+1]
                 data = json.loads(json_str)
                 if "reply_to_user" in data: display_text = data["reply_to_user"]
                 
-                if data.get("action") == "update":
-                    if "new_memory" in data:
-                        update_file("Jarvis_Memory.txt", data["new_memory"])
-                        st.toast("Memory Updated", icon="💾")
-                    if "new_tasks" in data:
-                        update_file("Jarvis_Tasks.txt", data["new_tasks"])
-                        st.toast("Tasks Updated", icon="✅")
+                # Execute Actions
+                if data.get("action") == "update_memory":
+                    update_file("Jarvis_Memory.txt", data["new_memory"])
+                    st.toast("Memory Updated", icon="💾")
+                elif data.get("action") == "update_tasks":
+                    update_file("Jarvis_Tasks.txt", data["new_tasks"])
+                    st.toast("Tasks Updated", icon="✅")
+                elif data.get("action") == "schedule":
+                    success = add_calendar_event(data["summary"], data["time"])
+                    if success: st.toast("Event Scheduled!", icon="📅")
+                    else: st.error("Schedule Failed. Check Permissions.")
             except: pass
 
         try:
@@ -283,7 +317,6 @@ if should_run:
         except: audio_path = None
 
         st.session_state.chat_history.append({"role": "assistant", "content": display_text, "audio_file": audio_path})
-        
         with st.chat_message("assistant"):
             st.write(display_text)
             if audio_path: st.audio(audio_path, autoplay=True)
