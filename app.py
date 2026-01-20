@@ -19,25 +19,28 @@ MY_EMAIL = "mybusiness110010@gmail.com"
 # !!! REPLACE WITH YOUR CALENDAR ID (Usually just your email) !!!
 CALENDAR_ID = "mybusiness110010@gmail.com"
 
-# --- 1. SETUP CREDENTIALS (THE FIX) ---
+# --- 1. SETUP CREDENTIALS (SELF-HEALING) ---
 drive_service = None
 cal_service = None
 
 try:
-    # 1. Try to find the JSON string (Universal Finder)
     key_dict = None
     
-    # Check if it's at the top level
-    if "FIREBASE_JSON_STR" in st.secrets:
-        key_dict = json.loads(st.secrets["FIREBASE_JSON_STR"])
-    # Check if it's nested under [FIREBASE_KEY] (Likely scenario)
-    elif "FIREBASE_KEY" in st.secrets and "FIREBASE_JSON_STR" in st.secrets["FIREBASE_KEY"]:
-        key_dict = json.loads(st.secrets["FIREBASE_KEY"]["FIREBASE_JSON_STR"])
-    # Check if it's the old format (Individual keys)
-    elif "FIREBASE_KEY" in st.secrets:
-        key_dict = dict(st.secrets["FIREBASE_KEY"])
-        
+    # 1. Load the data from secrets
+    if "FIREBASE_KEY" in st.secrets:
+        # Check if it's the Nested TOML format
+        if isinstance(st.secrets["FIREBASE_KEY"], dict):
+            key_dict = dict(st.secrets["FIREBASE_KEY"])
+        # Check if it's a JSON string
+        elif isinstance(st.secrets["FIREBASE_KEY"], str):
+             key_dict = json.loads(st.secrets["FIREBASE_KEY"])
+    
     if key_dict:
+        # --- THE FIX: REPAIR THE PRIVATE KEY FORMAT ---
+        # This converts the text "\n" into actual Enter key presses
+        if "private_key" in key_dict:
+            key_dict["private_key"] = key_dict["private_key"].replace("\\n", "\n")
+
         # Create Credentials
         creds = service_account.Credentials.from_service_account_info(
             key_dict, 
@@ -46,7 +49,7 @@ try:
         drive_service = build('drive', 'v3', credentials=creds)
         cal_service = build('calendar', 'v3', credentials=creds)
     else:
-        st.error("Credentials not found in Secrets.")
+        st.error("Credentials not found. Please check secrets.toml")
         
 except Exception as e:
     st.error(f"Credential Error: {e}")
